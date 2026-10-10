@@ -1502,7 +1502,7 @@ func TestFromFiles(t *testing.T) {
 			require.NoError(t, err)
 
 			detector.FollowSymlinks = true
-			paths, err := sources.DirectoryTargets(tt.source, detector.Sema, true, cfg.Allowlists)
+			paths, err := sources.DirectoryTargets(tt.source, detector.Scheduler, true, cfg.Allowlists)
 			require.NoError(t, err)
 
 			findings, err := detector.DetectFiles(paths)
@@ -2081,6 +2081,7 @@ func TestDetectWithArchives(t *testing.T) {
 			require.NoError(t, err)
 
 			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 			if tt.expireContext {
 				cancel()
 			}
@@ -2092,7 +2093,7 @@ func TestDetectWithArchives(t *testing.T) {
 			findings, err := detector.DetectSource(
 				ctx, &sources.Files{
 					Path:            tt.source,
-					Sema:            detector.Sema,
+					Scheduler:       detector.Scheduler,
 					Config:          &cfg,
 					MaxArchiveDepth: detector.MaxArchiveDepth,
 				},
@@ -2174,7 +2175,7 @@ func TestDetectWithSymlinks(t *testing.T) {
 		cfg, _ := vc.Translate()
 		detector := NewDetector(cfg)
 		detector.FollowSymlinks = true
-		paths, err := sources.DirectoryTargets(tt.source, detector.Sema, true, cfg.Allowlists)
+		paths, err := sources.DirectoryTargets(tt.source, detector.Scheduler, true, cfg.Allowlists)
 		require.NoError(t, err)
 
 		findings, err := detector.DetectFiles(paths)

@@ -79,7 +79,7 @@ func runDetect(cmd *cobra.Command, args []string) {
 				FollowSymlinks:  detector.FollowSymlinks,
 				MaxFileSize:     detector.MaxTargetMegaBytes * 1_000_000,
 				Path:            sourcePath,
-				Sema:            detector.Sema,
+				Scheduler:       detector.Scheduler,
 				MaxArchiveDepth: detector.MaxArchiveDepth,
 			},
 		)
@@ -121,7 +121,7 @@ func runDetect(cmd *cobra.Command, args []string) {
 				Cmd:             gitCmd,
 				Config:          &detector.Config,
 				Remote:          sources.NewRemoteInfoContext(cmd.Context(), scmPlatform, sourcePath),
-				Sema:            detector.Sema,
+				Scheduler:       detector.Scheduler,
 				MaxArchiveDepth: detector.MaxArchiveDepth,
 			},
 		)

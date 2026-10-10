@@ -61,7 +61,7 @@ func runDirectory(cmd *cobra.Command, args []string) {
 			FollowSymlinks:  detector.FollowSymlinks,
 			MaxFileSize:     detector.MaxTargetMegaBytes * 1_000_000,
 			Path:            source,
-			Sema:            detector.Sema,
+			Scheduler:       detector.Scheduler,
 			MaxArchiveDepth: detector.MaxArchiveDepth,
 		},
 	)

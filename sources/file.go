@@ -183,7 +183,7 @@ func (s *File) fileFragments(ctx context.Context, reader *bufio.Reader, yield Fr
 			n, err := reader.Read(s.Buffer)
 			if n == 0 {
 				if err != nil && err != io.EOF {
-					return yield(fragment, fmt.Errorf("could not read file: %w", err))
+					return yield(ctx, fragment, fmt.Errorf("could not read file: %w", err))
 				}
 
 				return nil
@@ -194,6 +194,7 @@ func (s *File) fileFragments(ctx context.Context, reader *bufio.Reader, yield Fr
 				// TODO: could other optimizations be introduced here?
 				if mimetype, err := filetype.Match(s.Buffer[:n]); err != nil {
 					return yield(
+						ctx,
 						fragment,
 						fmt.Errorf("could not read file: could not determine type: %w", err),
 					)
@@ -211,6 +212,7 @@ func (s *File) fileFragments(ctx context.Context, reader *bufio.Reader, yield Fr
 			peekBuf := bytes.NewBuffer(s.Buffer[:n])
 			if err := readUntilSafeBoundary(reader, n, maxPeekSize, peekBuf); err != nil {
 				return yield(
+					ctx,
 					fragment,
 					fmt.Errorf("could not read file: could not read until safe boundary: %w", err),
 				)
@@ -240,10 +242,10 @@ func (s *File) fileFragments(ctx context.Context, reader *bufio.Reader, yield Fr
 
 			// Done with the file!
 			if err == io.EOF {
-				return yield(fragment, nil)
+				return yield(ctx, fragment, nil)
 			}
 
-			if err := yield(fragment, err); err != nil {
+			if err := yield(ctx, fragment, err); err != nil {
 				return err
 			}
 		}

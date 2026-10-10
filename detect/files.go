@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"sync"
 
 	"github.com/zricethezav/gitleaks/v8/logging"
 	"github.com/zricethezav/gitleaks/v8/report"
@@ -15,14 +14,10 @@ import (
 //
 // Deprecated: Use sources.Files and Detector.DetectSource instead
 func (d *Detector) DetectFiles(scanTargets <-chan sources.ScanTarget) ([]report.Finding, error) {
-	var wg sync.WaitGroup
+	ctx := context.Background()
 
 	for scanTarget := range scanTargets {
-		wg.Add(1)
-
-		d.Sema.Go(func() error {
-			defer wg.Done()
-
+		dispatchErr := d.Scheduler.Go(ctx, scanTarget.Path, scanTarget.Size, func(taskCtx context.Context) error {
 			logger := logging.With().Str("path", scanTarget.Path).Logger()
 			logger.Trace().Msg("scanning path")
 
@@ -72,21 +67,29 @@ func (d *Detector) DetectFiles(scanTargets <-chan sources.ScanTarget) ([]report.
 				MaxArchiveDepth: d.MaxArchiveDepth,
 			}
 
-			ctx := context.Background()
-			return file.Fragments(ctx, func(fragment sources.Fragment, err error) error {
+			return file.Fragments(taskCtx, func(fragCtx context.Context, fragment sources.Fragment, err error) error {
 				if err != nil {
 					logging.Error().Err(err)
 					return nil
 				}
 
-				for _, finding := range d.Detect(Fragment(fragment)) {
+				for _, finding := range d.DetectContext(fragCtx, Fragment(fragment)) {
 					d.AddFinding(finding)
 				}
 				return nil
 			})
 		})
+
+		if errors.Is(dispatchErr, sources.ErrMemoryBudget) {
+			// Already logged by the scheduler; drain the remaining targets so
+			// each is logged too.
+			continue
+		}
+		if dispatchErr != nil {
+			return d.findings, dispatchErr
+		}
 	}
 
-	wg.Wait()
+	d.Scheduler.Wait()
 	return d.findings, nil
 }

@@ -33,6 +33,10 @@ type ViperConfig struct {
 	Title       string
 	Description string
 	Extend      Extend
+
+	Concurrency viperConcurrency
+	Resources   viperResources
+
 	Rules       []struct {
 		ID          string
 		Description string
@@ -95,6 +99,9 @@ type Config struct {
 	OrderedRules []string
 	Allowlists   []*Allowlist
 	MinVersion   string
+
+	Concurrency Concurrency
+	Resources   Resources
 }
 
 // Extend is a struct that allows users to define how they want their
@@ -113,6 +120,19 @@ func (vc *ViperConfig) Translate() (Config, error) {
 		rulesMap       = make(map[string]Rule)
 		ruleAllowlists = make(map[string][]*Allowlist)
 	)
+
+	// Concurrency and resource limits are top-level operational settings; they
+	// are only read from the root config. Validation happens here, i.e. before
+	// the scan starts.
+	concurrency := Concurrency{}
+	resources := Resources{}
+	if extendDepth == 0 {
+		var err error
+		concurrency, resources, err = vc.translateLimits()
+		if err != nil {
+			return Config{}, err
+		}
+	}
 
 	// Validate individual rules.
 	for _, vr := range vc.Rules {
@@ -202,6 +222,9 @@ func (vc *ViperConfig) Translate() (Config, error) {
 		Keywords:     keywords,
 		OrderedRules: orderedRules,
 		MinVersion:   vc.MinVersion,
+
+		Concurrency: concurrency,
+		Resources:   resources,
 	}
 
 	if extendDepth > 0 {

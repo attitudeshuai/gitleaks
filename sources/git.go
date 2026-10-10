@@ -12,10 +12,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/fatih/semgroup"
 	"github.com/gitleaks/go-gitdiff/gitdiff"
 
 	"github.com/zricethezav/gitleaks/v8/cmd/scm"
@@ -281,7 +279,7 @@ type Git struct {
 	Cmd             *GitCmd
 	Config          *config.Config
 	Remote          *RemoteInfo
-	Sema            *semgroup.Group
+	Scheduler       *Scheduler
 	MaxArchiveDepth int
 }
 
@@ -303,10 +301,14 @@ func (s *Git) Fragments(ctx context.Context, yield FragmentsFunc) error {
 		}
 	}()
 
+	scheduler := s.Scheduler
+	if scheduler == nil {
+		scheduler = NewScheduler(0, 0, 0)
+	}
+
 	var (
 		diffFilesCh = s.Cmd.DiffFilesCh()
 		errCh       = s.Cmd.ErrCh()
-		wg          sync.WaitGroup
 	)
 
 	// loop to range over both DiffFiles (stdout) and ErrCh (stderr)
@@ -358,12 +360,25 @@ func (s *Git) Fragments(ctx context.Context, yield FragmentsFunc) error {
 				}
 			}
 
-			wg.Add(1)
-			s.Sema.Go(func() error {
-				defer wg.Done()
+			// Estimate the target's occupancy from the added content. Archive
+			// blobs are read lazily; their size is not known before dispatch.
+			var estSize int64
+			if !yieldAsArchive {
+				for _, textFragment := range gitdiffFile.TextFragments {
+					if textFragment != nil {
+						estSize += int64(len(textFragment.Raw(gitdiff.OpAdd)))
+					}
+				}
+			}
 
+			targetID := gitdiffFile.NewName
+			if commitSHA != "" {
+				targetID = commitSHA[:7] + ":" + gitdiffFile.NewName
+			}
+
+			dispatchErr := scheduler.Go(ctx, targetID, estSize, func(taskCtx context.Context) error {
 				if yieldAsArchive {
-					blob, err := s.Cmd.NewBlobReaderContext(ctx, commitSHA, gitdiffFile.NewName)
+					blob, err := s.Cmd.NewBlobReaderContext(taskCtx, commitSHA, gitdiffFile.NewName)
 					if err != nil {
 						logging.Error().Err(err).Msg("could not read archive blob")
 						return nil
@@ -377,10 +392,10 @@ func (s *Git) Fragments(ctx context.Context, yield FragmentsFunc) error {
 					}
 
 					// enrich and yield fragments
-					err = file.Fragments(ctx, func(fragment Fragment, err error) error {
+					err = file.Fragments(taskCtx, func(fragCtx context.Context, fragment Fragment, err error) error {
 						fragment.CommitSHA = commitSHA
 						fragment.CommitInfo = commitInfo
-						return yield(fragment, err)
+						return yield(fragCtx, fragment, err)
 					})
 
 					// Close the blob reader and log any issues
@@ -404,30 +419,39 @@ func (s *Git) Fragments(ctx context.Context, yield FragmentsFunc) error {
 						CommitInfo: commitInfo,
 					}
 
-					if err := yield(fragment, nil); err != nil {
+					if err := yield(taskCtx, fragment, nil); err != nil {
 						return err
 					}
 				}
 
 				return nil
 			})
+
+			if errors.Is(dispatchErr, ErrMemoryBudget) {
+				// The scheduler logged this target with the reason. Keep
+				// draining the diff stream so every target not dispatched is
+				// logged too.
+				continue
+			}
+			if dispatchErr != nil {
+				return dispatchErr
+			}
 		case err, open := <-errCh:
 			if !open {
 				errCh = nil
 				break
 			}
 
-			return yield(Fragment{}, err)
+			return yield(ctx, Fragment{}, err)
 		}
 	}
 
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-		wg.Wait()
-		return nil
+	// Wait for every dispatched target to wind down.
+	scheduler.Wait()
+	if err := ctx.Err(); err != nil {
+		return err
 	}
+	return nil
 }
 
 // NewRemoteInfo builds a new RemoteInfo for generating finding links

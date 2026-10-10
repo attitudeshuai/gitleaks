@@ -18,7 +18,6 @@ import (
 	"github.com/zricethezav/gitleaks/v8/sources"
 
 	ahocorasick "github.com/BobuSumisu/aho-corasick"
-	"github.com/fatih/semgroup"
 	"github.com/rs/zerolog"
 	"github.com/spf13/viper"
 	"golang.org/x/exp/maps"
@@ -83,6 +82,14 @@ type Detector struct {
 	// report.
 	findings []report.Finding
 
+	// maxFindings limits how many findings are retained. 0 disables the
+	// limit.
+	maxFindings int
+
+	// findingsDropped counts findings not retained because maxFindings was
+	// reached. Guarded by findingMutex.
+	findingsDropped int
+
 	// prefilter is a ahocorasick struct used for doing efficient string
 	// matching given a set of words (keywords from the rules in the config)
 	prefilter ahocorasick.Trie
@@ -96,8 +103,9 @@ type Detector struct {
 	// gitleaksIgnore
 	gitleaksIgnore map[string]struct{}
 
-	// Sema (https://github.com/fatih/semgroup) controls the concurrency
-	Sema *semgroup.Group
+	// Scheduler controls the concurrency, the in-flight target limit and the
+	// memory budget for source scans.
+	Scheduler *sources.Scheduler
 
 	// report-related settings.
 	ReportPath string
@@ -126,8 +134,13 @@ func NewDetectorContext(ctx context.Context, cfg config.Config) *Detector {
 		commitMutex:    &sync.Mutex{},
 		findings:       make([]report.Finding, 0),
 		Config:         cfg,
+		maxFindings:    cfg.Resources.MaxFindings,
 		prefilter:      *ahocorasick.NewTrieBuilder().AddStrings(maps.Keys(cfg.Keywords)).Build(),
-		Sema:           semgroup.NewGroup(ctx, 40),
+		Scheduler: sources.NewScheduler(
+			cfg.Concurrency.Workers,
+			cfg.Concurrency.MaxInFlight,
+			cfg.Resources.MemoryBytes,
+		),
 	}
 }
 
@@ -206,7 +219,7 @@ func (d *Detector) DetectString(content string) []report.Finding {
 
 // DetectSource scans the given source and returns a list of findings
 func (d *Detector) DetectSource(ctx context.Context, source sources.Source) ([]report.Finding, error) {
-	err := source.Fragments(ctx, func(fragment sources.Fragment, err error) error {
+	err := source.Fragments(ctx, func(ctx context.Context, fragment sources.Fragment, err error) error {
 		logContext := logging.With()
 
 		if len(fragment.FilePath) > 0 {
@@ -263,7 +276,41 @@ func (d *Detector) DetectSource(ctx context.Context, source sources.Source) ([]r
 		logging.Debug().Msg("Note: this number might be smaller than expected due to commits with no additions")
 	}
 
-	return d.Findings(), err
+	findings := d.Findings()
+
+	if err != nil {
+		return findings, err
+	}
+
+	// Memory budget: once it is exhausted, no further targets are dispatched
+	// and the scan ends after in-flight targets finish. Decide, per
+	// configuration, whether the scan fails or ends with partial results.
+	if d.Scheduler != nil && d.Scheduler.MemoryExhausted() {
+		logging.Warn().
+			Int64("dispatched", d.Scheduler.Dispatched()).
+			Int64("not-dispatched", d.Scheduler.Skipped()).
+			Int64("memory-budget", d.Config.Resources.MemoryBytes).
+			Msg("scan stopped: memory budget exhausted; targets not dispatched were skipped")
+		if d.Config.Resources.OnExhausted == config.OnExhaustedFail {
+			return findings, fmt.Errorf(
+				"%w: %d target(s) not dispatched",
+				sources.ErrMemoryBudget, d.Scheduler.Skipped())
+		}
+	}
+
+	// Finding cap: scanning continues, but findings beyond the cap are not
+	// retained. Report how many were truncated and why.
+	d.findingMutex.Lock()
+	dropped := d.findingsDropped
+	d.findingMutex.Unlock()
+	if dropped > 0 {
+		logging.Warn().
+			Int("limit", d.maxFindings).
+			Int("truncated", dropped).
+			Msg("findings truncated: max_findings limit reached")
+	}
+
+	return findings, nil
 }
 
 // Detect scans the given fragment and returns a list of findings
@@ -355,7 +402,17 @@ ScanLoop:
 			}
 
 			// decode the currentRaw for the next pass
+			previousRawLen := len(currentRaw)
 			currentRaw, encodedSegments = decoder.Decode(currentRaw, encodedSegments)
+
+			// Account for the decoding expansion (or shrinkage) against the
+			// target's memory estimate. This is a no-op outside a dispatched
+			// target, e.g. direct DetectString calls.
+			if delta := int64(len(currentRaw)) - int64(previousRawLen); delta != 0 {
+				if t := sources.TargetFromContext(ctx); t != nil {
+					t.Grow(delta)
+				}
+			}
 
 			// stop the loop when there's nothing else to decode
 			if len(encodedSegments) == 0 {
@@ -741,6 +798,25 @@ func (d *Detector) AddFinding(finding report.Finding) {
 	}
 
 	d.findingMutex.Lock()
+	if d.maxFindings > 0 && len(d.findings) >= d.maxFindings {
+		d.findingsDropped++
+		dropped := d.findingsDropped
+		d.findingMutex.Unlock()
+
+		if dropped == 1 {
+			logging.Warn().
+				Int("limit", d.maxFindings).
+				Str("rule-id", finding.RuleID).
+				Msg("finding limit reached: truncating new findings")
+		} else {
+			logging.Debug().
+				Int("dropped", dropped).
+				Str("rule-id", finding.RuleID).
+				Msg("skipping finding: max_findings limit reached")
+		}
+		return
+	}
+
 	d.findings = append(d.findings, finding)
 	if d.Verbose {
 		printFinding(finding, d.NoColor)
@@ -751,6 +827,29 @@ func (d *Detector) AddFinding(finding report.Finding) {
 // Findings returns the findings added to the detector
 func (d *Detector) Findings() []report.Finding {
 	return d.findings
+}
+
+// FindingsTruncated returns the number of findings that were not retained
+// because the max_findings limit was reached.
+func (d *Detector) FindingsTruncated() int {
+	d.findingMutex.Lock()
+	defer d.findingMutex.Unlock()
+	return d.findingsDropped
+}
+
+// MemoryBudgetExhausted reports whether the scan was stopped by the memory
+// budget.
+func (d *Detector) MemoryBudgetExhausted() bool {
+	return d.Scheduler != nil && d.Scheduler.MemoryExhausted()
+}
+
+// TargetsNotDispatched returns the number of targets that were not dispatched
+// because the memory budget was exhausted.
+func (d *Detector) TargetsNotDispatched() int64 {
+	if d.Scheduler == nil {
+		return 0
+	}
+	return d.Scheduler.Skipped()
 }
 
 // AddCommit synchronously adds a commit to the commit slice

@@ -20,7 +20,7 @@ func (d *Detector) DetectReader(r io.Reader, bufSize int) ([]report.Finding, err
 	}
 
 	ctx := context.Background()
-	err := file.Fragments(ctx, func(fragment sources.Fragment, err error) error {
+	err := file.Fragments(ctx, func(ctx context.Context, fragment sources.Fragment, err error) error {
 		if err != nil {
 			return err
 		}
@@ -87,7 +87,7 @@ func (d *Detector) StreamDetectReader(r io.Reader, bufSize int) (<-chan report.F
 		defer close(errCh)
 
 		ctx := context.Background()
-		errCh <- file.Fragments(ctx, func(fragment sources.Fragment, err error) error {
+		errCh <- file.Fragments(ctx, func(ctx context.Context, fragment sources.Fragment, err error) error {
 			if err != nil {
 				return err
 			}

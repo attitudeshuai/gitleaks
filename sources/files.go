@@ -6,9 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"sync"
 
-	"github.com/fatih/semgroup"
 	"github.com/zricethezav/gitleaks/v8/config"
 	"github.com/zricethezav/gitleaks/v8/logging"
 )
@@ -17,31 +15,33 @@ import (
 type ScanTarget struct {
 	Path    string
 	Symlink string
+	// Size is the on-disk size of the target, used for memory-budget estimates.
+	Size int64
 }
 
 // Deprecated: Use Files and detector.DetectSource instead
-func DirectoryTargets(sourcePath string, s *semgroup.Group, followSymlinks bool, allowlists []*config.Allowlist) (<-chan ScanTarget, error) {
+func DirectoryTargets(sourcePath string, scheduler *Scheduler, followSymlinks bool, allowlists []*config.Allowlist) (<-chan ScanTarget, error) {
 	paths := make(chan ScanTarget)
 
 	// create a Files source
 	files := Files{
 		FollowSymlinks: followSymlinks,
 		Path:           sourcePath,
-		Sema:           s,
+		Scheduler:      scheduler,
 		Config: &config.Config{
 			Allowlists: allowlists,
 		},
 	}
 
-	s.Go(func() error {
+	go func() {
 		ctx := context.Background()
 		err := files.scanTargets(ctx, func(scanTarget ScanTarget, err error) error {
 			paths <- scanTarget
 			return nil
 		})
 		close(paths)
-		return err
-	})
+		_ = err
+	}()
 
 	return paths, nil
 }
@@ -52,7 +52,7 @@ type Files struct {
 	FollowSymlinks  bool
 	MaxFileSize     int
 	Path            string
-	Sema            *semgroup.Group
+	Scheduler       *Scheduler
 	MaxArchiveDepth int
 }
 
@@ -81,6 +81,7 @@ func (s *Files) scanTargets(ctx context.Context, yield func(ScanTarget, error) e
 			logger.Error().Err(err).Msg("skipping file: could not get info")
 			return nil
 		}
+		scanTarget.Size = info.Size()
 
 		if !d.IsDir() {
 			// Empty; nothing to do here.
@@ -117,6 +118,7 @@ func (s *Files) scanTargets(ctx context.Context, yield func(ScanTarget, error) e
 			scanTarget = ScanTarget{
 				Path:    realPath,
 				Symlink: path,
+				Size:    info.Size(),
 			}
 		}
 
@@ -140,52 +142,51 @@ func (s *Files) scanTargets(ctx context.Context, yield func(ScanTarget, error) e
 
 // Fragments yields fragments from files discovered under the path
 func (s *Files) Fragments(ctx context.Context, yield FragmentsFunc) error {
-	var wg sync.WaitGroup
+	scheduler := s.Scheduler
+	if scheduler == nil {
+		scheduler = NewScheduler(0, 0, 0)
+	}
 
-	err := s.scanTargets(ctx, func(scanTarget ScanTarget, err error) error {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-			wg.Add(1)
-			s.Sema.Go(func() error {
-				logger := logging.With().Str("path", scanTarget.Path).Logger()
-				logger.Trace().Msg("scanning path")
+	walkErr := s.scanTargets(ctx, func(scanTarget ScanTarget, err error) error {
+		dispatchErr := scheduler.Go(ctx, scanTarget.Path, scanTarget.Size, func(taskCtx context.Context) error {
+			logger := logging.With().Str("path", scanTarget.Path).Logger()
+			logger.Trace().Msg("scanning path")
 
-				f, err := os.Open(scanTarget.Path)
-				if err != nil {
-					if os.IsPermission(err) {
-						logger.Warn().Msg("skipping file: permission denied")
-					}
-					wg.Done()
-					return nil
+			f, err := os.Open(scanTarget.Path)
+			if err != nil {
+				if os.IsPermission(err) {
+					logger.Warn().Msg("skipping file: permission denied")
 				}
+				return nil
+			}
 
-				// Convert this to a file source
-				file := File{
-					Content:         f,
-					Path:            scanTarget.Path,
-					Symlink:         scanTarget.Symlink,
-					Config:          s.Config,
-					MaxArchiveDepth: s.MaxArchiveDepth,
-				}
+			// Convert this to a file source
+			file := File{
+				Content:         f,
+				Path:            scanTarget.Path,
+				Symlink:         scanTarget.Symlink,
+				Config:          s.Config,
+				MaxArchiveDepth: s.MaxArchiveDepth,
+			}
 
-				err = file.Fragments(ctx, yield)
-				// Avoiding a defer in a hot loop
-				_ = f.Close()
-				wg.Done()
-				return err
-			})
+			err = file.Fragments(taskCtx, yield)
+			// Avoiding a defer in a hot loop
+			_ = f.Close()
+			return err
+		})
 
+		if errors.Is(dispatchErr, ErrMemoryBudget) {
+			// The scheduler already logged this target with the reason. Keep
+			// walking so every target that is not dispatched is logged too.
 			return nil
 		}
+		return dispatchErr
 	})
 
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-		wg.Wait()
+	// Wait for every dispatched target to wind down.
+	scheduler.Wait()
+	if err := ctx.Err(); err != nil {
 		return err
 	}
+	return walkErr
 }
