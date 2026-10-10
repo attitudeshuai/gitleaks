@@ -51,6 +51,12 @@ type Rule struct {
 	// In otherwords, this rule is now a composite rule.
 	RequiredRules []*Required
 
+	// Strategy is the optional rule-level decoding and entropy judgment
+	// policy. When nil the rule uses the historical behavior: participate in
+	// every global decoding pass and use the single Entropy threshold.
+	// The pointer is shared (read-only) across all concurrent scan workers.
+	Strategy *Strategy
+
 	SkipReport bool
 }
 
@@ -100,6 +106,10 @@ func (r *Rule) Validate() error {
 		if err := allowlist.Validate(); err != nil {
 			return fmt.Errorf("%s: %w", r.RuleID, err)
 		}
+	}
+
+	if err := r.validateStrategy(); err != nil {
+		return err
 	}
 
 	r.validated = true

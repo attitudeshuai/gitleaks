@@ -1,0 +1,104 @@
+title = "gitleaks rule policy config"
+
+# This rule only participates in base64 decoding passes: its plaintext value
+# is still detected on the raw pass, its base64 value is detected, but its
+# percent-encoded value is not.
+[[rules]]
+id = 'policy-b64-only'
+description = 'Base64-only policy rule'
+regex = '''policy-key=([a-z]{10,})'''
+secretGroup = 1
+keywords = ['policy-key']
+
+[rules.decoding]
+encodings = ['base64']
+
+# This rule opts out of every encoding, so it is only ever matched against
+# the raw text, even when global decoding is enabled.
+[[rules]]
+id = 'policy-no-decode'
+description = 'Decoding opt-out policy rule'
+regex = '''no-decode=([a-z0-9]{10,})'''
+secretGroup = 1
+keywords = ['no-decode']
+
+[rules.decoding]
+encodings = []
+
+# A rule without a policy keeps the historical behavior and participates in
+# every encoding pass.
+[[rules]]
+id = 'policy-any-decode'
+description = 'Default policy rule'
+regex = '''any-key=([a-z0-9]{10,})'''
+secretGroup = 1
+keywords = ['any-key']
+
+# The entropy condition targets capture group 1 and requires digits only.
+[[rules]]
+id = 'policy-numeric-group'
+description = 'Numeric capture group policy rule'
+regex = '''numkey=([0-9]{8,})'''
+secretGroup = 1
+keywords = ['numkey']
+
+[[rules.entropy_conditions]]
+target = 'group'
+group = 1
+threshold = 3.0
+minLength = 8
+charset = 'numeric'
+
+# This rule only accepts a value that comes out of base64 decoding and is at
+# least 10 characters long. Its plaintext occurrence is dropped on the raw
+# pass because there is no decoded content there.
+[[rules]]
+id = 'policy-decoded-only'
+description = 'Decoded-only policy rule'
+regex = '''decoded-only-key=([a-z0-9]{8,})'''
+secretGroup = 1
+keywords = ['decoded-only-key']
+
+[rules.decoding]
+encodings = ['base64']
+minLength = 10
+
+[[rules.entropy_conditions]]
+target = 'decoded'
+threshold = 3.0
+
+# This rule caps itself at one decoding pass, so the double-encoded value
+# (base64 of base64) is not reported by it.
+[[rules]]
+id = 'policy-deep-1'
+description = 'Single depth policy rule'
+regex = '''deep-key=([a-z0-9]{8,})'''
+secretGroup = 1
+keywords = ['deep-key']
+
+[rules.decoding]
+encodings = ['base64']
+maxDepth = 1
+
+# The same rule without a depth cap follows the value through both passes.
+[[rules]]
+id = 'policy-deep-any'
+description = 'Uncapped depth policy rule'
+regex = '''deep-key=([a-z0-9]{8,})'''
+secretGroup = 1
+keywords = ['deep-key']
+
+[rules.decoding]
+encodings = ['base64']
+
+# This rule only accepts percent-decoded values at least 10 characters long.
+[[rules]]
+id = 'policy-percent-min-length'
+description = 'Percent policy rule with minimum decoded length'
+regex = '''sk=([a-z0-9]+)'''
+secretGroup = 1
+keywords = ['sk']
+
+[rules.decoding]
+encodings = ['percent']
+minLength = 10

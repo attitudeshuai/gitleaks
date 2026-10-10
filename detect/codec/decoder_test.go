@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestDecode(t *testing.T) {
@@ -141,4 +142,62 @@ func TestDecode(t *testing.T) {
 			assert.Equal(t, tt.expected, fullDecode(encodedChunk))
 		})
 	}
+}
+
+// TestDecoderEncodingSubsets verifies that a decoder limited to a subset of
+// encodings only decodes the segments of those encodings.
+func TestDecoderEncodingSubsets(t *testing.T) {
+	// A percent encoded and a base64 encoded value on the same line.
+	chunk := `secret=%3D bG9uZ2VyLWVuY29kZWQtc2VjcmV0LXRlc3Q=`
+
+	t.Run("percent only", func(t *testing.T) {
+		decoder := NewDecoder(PercentKind)
+		assert.Equal(t, PercentKind, decoder.Kinds())
+		out, segments := decoder.Decode(chunk, nil)
+		require.Len(t, segments, 1)
+		assert.Equal(t, PercentKind, segments[0].encodings)
+		assert.Equal(t, `secret== bG9uZ2VyLWVuY29kZWQtc2VjcmV0LXRlc3Q=`, out)
+	})
+
+	t.Run("base64 only", func(t *testing.T) {
+		decoder := NewDecoder(Base64Kind)
+		assert.Equal(t, Base64Kind, decoder.Kinds())
+		out, segments := decoder.Decode(chunk, nil)
+		require.Len(t, segments, 1)
+		assert.Equal(t, Base64Kind, segments[0].encodings)
+		assert.Equal(t, `secret=%3D longer-encoded-secret-test`, out)
+	})
+
+	t.Run("all by default", func(t *testing.T) {
+		decoder := NewDecoder()
+		assert.Equal(t, AllEncodingKinds, decoder.Kinds())
+		out, segments := decoder.Decode(chunk, nil)
+		require.Len(t, segments, 2)
+		assert.Equal(t, `secret== longer-encoded-secret-test`, out)
+	})
+}
+
+func TestParseEncodingKinds(t *testing.T) {
+	kinds, err := ParseEncodingKinds([]string{"Base64", " hex "})
+	require.NoError(t, err)
+	assert.Equal(t, Base64Kind|HexKind, kinds)
+
+	_, err = ParseEncodingKinds([]string{"rot13"})
+	assert.ErrorContains(t, err, `unknown encoding "rot13"`)
+}
+
+func TestDecodedValue(t *testing.T) {
+	decoder := NewDecoder()
+	data := `token: bG9uZ2VyLWVuY29kZWQtc2VjcmV0LXRlc3Q=`
+	out, segments := decoder.Decode(data, nil)
+	require.Len(t, segments, 1)
+
+	// A range fully covering the decoded segment returns the whole value.
+	assert.Equal(t, "longer-encoded-secret-test", DecodedValue(segments, out, 7, len(out)))
+	// A partial range intersects the decoded value.
+	assert.Equal(t, "longer", DecodedValue(segments, out, 7, 13))
+	// A range outside the decoded content returns nothing.
+	assert.Equal(t, "", DecodedValue(segments, out, 0, 7))
+	// No segments returns nothing.
+	assert.Equal(t, "", DecodedValue(nil, out, 0, len(out)))
 }

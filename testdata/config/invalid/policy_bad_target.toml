@@ -1,0 +1,10 @@
+title = "gitleaks config"
+
+[[rules]]
+id = "policy-bad-target"
+description = "Unknown entropy condition target"
+regex = '''foo=([a-z]+)'''
+
+[[rules.entropy_conditions]]
+target = "line"
+threshold = 3.0

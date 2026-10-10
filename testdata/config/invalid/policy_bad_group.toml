@@ -1,0 +1,11 @@
+title = "gitleaks config"
+
+[[rules]]
+id = "policy-bad-group"
+description = "Entropy condition references a missing capture group"
+regex = '''foo=([a-z]+)'''
+
+[[rules.entropy_conditions]]
+target = "group"
+group = 3
+threshold = 3.0

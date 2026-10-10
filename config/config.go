@@ -43,6 +43,13 @@ type ViperConfig struct {
 		Keywords    []string
 		Tags        []string
 
+		// Decoding is the rule-level decoding policy ([rules.decoding]).
+		Decoding *viperDecoding
+
+		// EntropyConditions are the per-match entropy judgments
+		// ([[rules.entropy_conditions]]).
+		EntropyConditions []*viperEntropyCondition `mapstructure:"entropy_conditions"`
+
 		// Deprecated: this is a shim for backwards-compatibility.
 		// TODO: Remove this in 9.x.
 		AllowList *viperRuleAllowlist
@@ -149,6 +156,15 @@ func (vc *ViperConfig) Translate() (Config, error) {
 			Tags:        vr.Tags,
 			SkipReport:  vr.SkipReport,
 		}
+
+		// Parse the rule-level decoding and entropy strategy. This is done
+		// once at config load time so the result can be safely shared by all
+		// scan workers.
+		strategy, err := parseStrategy(vr.Decoding, vr.EntropyConditions)
+		if err != nil {
+			return Config{}, fmt.Errorf("%s: %w", cr.RuleID, err)
+		}
+		cr.Strategy = strategy
 
 		// Parse the rule allowlists, including the older format for backwards compatibility.
 		if vr.AllowList != nil {
@@ -471,6 +487,9 @@ func (c *Config) extend(extensionConfig Config) {
 			}
 			if currentRule.Path != nil {
 				baseRule.Path = currentRule.Path
+			}
+			if currentRule.Strategy != nil {
+				baseRule.Strategy = currentRule.Strategy
 			}
 			baseRule.Tags = append(baseRule.Tags, currentRule.Tags...)
 			baseRule.Keywords = append(baseRule.Keywords, currentRule.Keywords...)

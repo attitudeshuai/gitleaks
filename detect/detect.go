@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -304,67 +305,127 @@ func (d *Detector) DetectContext(ctx context.Context, fragment Fragment) []repor
 		return findings
 	}
 
-	// setup variables to handle different decoding passes
-	currentRaw := fragment.Raw
-	encodedSegments := []*codec.EncodedSegment{}
-	currentDecodeDepth := 0
-	decoder := codec.NewDecoder()
+	// Use a deterministic rule order and build it only once per fragment.
+	orderedRules := d.Config.GetOrderedRules()
 
-ScanLoop:
-	for {
-		select {
-		case <-ctx.Done():
-			break ScanLoop
-		default:
-			// build keyword map for prefiltering rules
-			keywords := make(map[string]bool)
-			normalizedRaw := strings.ToLower(currentRaw)
-			matches := d.prefilter.MatchString(normalizedRaw)
-			for _, m := range matches {
-				keywords[normalizedRaw[m.Pos():int(m.Pos())+len(m.Match())]] = true
+	// Every rule is first evaluated against the raw fragment (depth 0),
+	// including rules that opted out of decoding.
+	findings = append(findings, d.detectRulesAtPass(ctx, fragment, fragment.Raw, orderedRules, nil)...)
+
+	if d.MaxDecodeDepth > 0 {
+		// Group the rules by the set of encodings they declared
+		// participation in. Rules without a strategy all land in the
+		// all-encodings group, which preserves the historical single
+		// decoding pipeline when no rule declares a policy.
+		groups := make(map[codec.EncodingKind][]config.Rule)
+		for _, rule := range orderedRules {
+			mask := codec.AllEncodingKinds
+			if rule.Strategy != nil && rule.Strategy.EncodingsDeclared {
+				mask = rule.Strategy.EnabledEncodings
 			}
+			if mask == 0 {
+				// The rule explicitly opted out of every encoding; it has
+				// already been scanned on the raw fragment above.
+				continue
+			}
+			groups[mask] = append(groups[mask], rule)
+		}
 
-			for _, rule := range d.Config.Rules {
+		masks := maps.Keys(groups)
+		sortMasks(masks)
+		for _, mask := range masks {
+			rules := groups[mask]
+			decoder := codec.NewDecoder(mask)
+			currentRaw := fragment.Raw
+			encodedSegments := []*codec.EncodedSegment{}
+
+		DecodeLoop:
+			for depth := 1; depth <= d.MaxDecodeDepth; depth++ {
 				select {
 				case <-ctx.Done():
-					break ScanLoop
+					break DecodeLoop
 				default:
-					if len(rule.Keywords) == 0 {
-						// if no keywords are associated with the rule always scan the
-						// fragment using the rule
-						findings = append(findings, d.detectRule(fragment, currentRaw, rule, encodedSegments)...)
-						continue
-					}
+				}
 
-					// check if keywords are in the fragment
-					for _, k := range rule.Keywords {
-						if _, ok := keywords[strings.ToLower(k)]; ok {
-							findings = append(findings, d.detectRule(fragment, currentRaw, rule, encodedSegments)...)
-							break
-						}
+				currentRaw, encodedSegments = decoder.Decode(currentRaw, encodedSegments)
+
+				// stop the pipeline when there's nothing else to decode
+				if len(encodedSegments) == 0 {
+					break DecodeLoop
+				}
+
+				// only re-match rules whose own depth cap allows this pass;
+				// the global max-decode-depth always remains the upper bound.
+				var activeRules []config.Rule
+				for _, rule := range rules {
+					if ruleDecodeDepth(rule, d.MaxDecodeDepth) >= depth {
+						activeRules = append(activeRules, rule)
 					}
 				}
-			}
+				if len(activeRules) == 0 {
+					break DecodeLoop
+				}
 
-			// increment the depth by 1 as we start our decoding pass
-			currentDecodeDepth++
-
-			// stop the loop if we've hit our max decoding depth
-			if currentDecodeDepth > d.MaxDecodeDepth {
-				break ScanLoop
-			}
-
-			// decode the currentRaw for the next pass
-			currentRaw, encodedSegments = decoder.Decode(currentRaw, encodedSegments)
-
-			// stop the loop when there's nothing else to decode
-			if len(encodedSegments) == 0 {
-				break ScanLoop
+				findings = append(findings, d.detectRulesAtPass(ctx, fragment, currentRaw, activeRules, encodedSegments)...)
 			}
 		}
 	}
 
 	return filter(findings, d.Redact)
+}
+
+// ruleDecodeDepth returns the effective decoding depth cap for a rule, which
+// is the global cap potentially reduced by the rule's own policy.
+func ruleDecodeDepth(rule config.Rule, global int) int {
+	if rule.Strategy != nil && rule.Strategy.MaxDepth > 0 && rule.Strategy.MaxDepth < global {
+		return rule.Strategy.MaxDepth
+	}
+	return global
+}
+
+// sortMasks sorts encoding masks into a deterministic order.
+func sortMasks(masks []codec.EncodingKind) {
+	sort.Slice(masks, func(i, j int) bool { return masks[i] < masks[j] })
+}
+
+// detectRulesAtPass runs the provided rules against |currentRaw| for a single
+// decoding pass (nil segments for the raw fragment). It applies the same
+// keyword prefiltering the detector has always used.
+func (d *Detector) detectRulesAtPass(ctx context.Context, fragment Fragment, currentRaw string, rules []config.Rule, encodedSegments []*codec.EncodedSegment) []report.Finding {
+	var findings []report.Finding
+
+	// build keyword map for prefiltering rules
+	keywords := make(map[string]bool)
+	normalizedRaw := strings.ToLower(currentRaw)
+	matches := d.prefilter.MatchString(normalizedRaw)
+	for _, m := range matches {
+		keywords[normalizedRaw[m.Pos():int(m.Pos())+len(m.Match())]] = true
+	}
+
+	for _, rule := range rules {
+		select {
+		case <-ctx.Done():
+			return findings
+		default:
+		}
+
+		if len(rule.Keywords) == 0 {
+			// if no keywords are associated with the rule always scan the
+			// fragment using the rule
+			findings = append(findings, d.detectRule(fragment, currentRaw, rule, encodedSegments)...)
+			continue
+		}
+
+		// check if keywords are in the fragment
+		for _, k := range rule.Keywords {
+			if _, ok := keywords[strings.ToLower(k)]; ok {
+				findings = append(findings, d.detectRule(fragment, currentRaw, rule, encodedSegments)...)
+				break
+			}
+		}
+	}
+
+	return findings
 }
 
 // detectRule scans the given fragment for the given rule and returns a list of findings
@@ -457,18 +518,37 @@ func (d *Detector) detectRule(fragment Fragment, currentRaw string, r config.Rul
 		var metaTags []string
 		currentLine := ""
 
+		// |overlapSegments| are the decoded segments this match overlaps
+		// (nil on the raw pass), |decodedValue| is the decoded text covered
+		// by the match.
+		var overlapSegments []*codec.EncodedSegment
+		decodedValue := ""
+
 		// Check if the decoded portions of the segment overlap with the match
 		// to see if its potentially a new match
 		if len(encodedSegments) > 0 {
-			segments := codec.SegmentsWithDecodedOverlap(encodedSegments, matchIndex[0], matchIndex[1])
-			if len(segments) == 0 {
+			overlapSegments = codec.SegmentsWithDecodedOverlap(encodedSegments, matchIndex[0], matchIndex[1])
+			if len(overlapSegments) == 0 {
 				// This item has already been added to a finding
 				continue
 			}
 
-			matchIndex = codec.AdjustMatchIndex(segments, matchIndex)
-			metaTags = append(metaTags, codec.Tags(segments)...)
-			currentLine = codec.CurrentLine(segments, currentRaw)
+			decodedValue = codec.DecodedValue(overlapSegments, currentRaw, matchIndex[0], matchIndex[1])
+
+			// Enforce the rule's minimum decoded value length before mapping
+			// the match back to the original text.
+			if r.Strategy != nil && r.Strategy.MinDecodedLength > 0 && len(decodedValue) < r.Strategy.MinDecodedLength {
+				logger.Trace().
+					Str("finding", secret).
+					Int("decoded-length", len(decodedValue)).
+					Int("min-length", r.Strategy.MinDecodedLength).
+					Msg("skipping finding: decoded value shorter than decoding.minLength")
+				continue
+			}
+
+			matchIndex = codec.AdjustMatchIndex(overlapSegments, matchIndex)
+			metaTags = append(metaTags, codec.Tags(overlapSegments)...)
+			currentLine = codec.CurrentLine(overlapSegments, currentRaw)
 		} else {
 			// Fixes: https://github.com/gitleaks/gitleaks/issues/1352
 			// removes the incorrectly following line that was detected by regex expression '\n'
@@ -518,9 +598,12 @@ func (d *Detector) detectRule(fragment Fragment, currentRaw string, r config.Rul
 			currentLine = finding.Line
 		}
 
-		// Set the value of |secret|, if the pattern contains at least one capture group.
+		// Extract the capture groups from the full match once; they are used
+		// both for selecting the secret and for entropy conditions.
 		// (The first element is the full match, hence we check >= 2.)
-		groups := r.Regex.FindStringSubmatch(finding.Secret)
+		groups := r.Regex.FindStringSubmatch(secret)
+
+		// Set the value of |secret|, if the pattern contains at least one capture group.
 		if len(groups) >= 2 {
 			if r.SecretGroup > 0 {
 				if len(groups) <= r.SecretGroup {
@@ -542,7 +625,25 @@ func (d *Detector) detectRule(fragment Fragment, currentRaw string, r config.Rul
 		// check entropy
 		entropy := shannonEntropy(finding.Secret)
 		finding.Entropy = float32(entropy)
-		if r.Entropy != 0.0 {
+		if r.Strategy != nil && len(r.Strategy.Conditions) > 0 {
+			// Evaluate the rule's declared entropy conditions in order. Any
+			// failure discards the match; satisfied conditions show up as
+			// tags on the finding.
+			ok, condTags, condition, reason, targetValue, targetEntropy := evaluateEntropyConditions(r, secret, groups, overlapSegments, decodedValue)
+			if !ok {
+				logger.Trace().
+					Str("finding", finding.Secret).
+					Int("condition", condition.Index).
+					Str("target", condition.Target.String()).
+					Str("target-value", targetValue).
+					Float64("target-entropy", targetEntropy).
+					Float64("threshold", condition.Threshold).
+					Str("reason", reason).
+					Msg("skipping finding: entropy condition not met")
+				continue
+			}
+			finding.Tags = append(finding.Tags, condTags...)
+		} else if r.Entropy != 0.0 {
 			// entropy is too low, skip this finding
 			if entropy <= r.Entropy {
 				logger.Trace().

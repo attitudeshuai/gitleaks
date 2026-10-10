@@ -826,6 +826,218 @@ const token = "mockSecret";
 	}
 }
 
+// policyTestValues exercises rule-level decoding and entropy policies:
+//   - policy-b64-only must match plaintext + base64, but not percent;
+//   - policy-no-decode must match plaintext only (its base64 form is never
+//     reported);
+//   - policy-any-decode (no strategy) must match plaintext + percent;
+//   - policy-numeric-group only accepts a digit-only capture group;
+//   - policy-decoded-only only matches its base64 form;
+//   - policy-deep-1 stops after one pass, policy-deep-any follows the
+//     double-encoded value through both passes;
+//   - policy-percent-min-length drops the short decoded value but keeps the
+//     long one.
+const policyTestValues = `
+policy-key=plainsecretvalue
+%70%6F%6C%69%63%79%2D%6B%65%79%3D%65%6E%63%6F%64%65%64%73%65%63%72%65%74%76%61%6C%75%65
+cG9saWN5LWtleT1lbmNvZGVkc2VjcmV0dmFsdWU=
+no-decode=plainxyz12345
+bm8tZGVjb2RlPWVuY29kZWRwbGFpbnh5ejEyMw==
+any-key=plaindecodedvalue1
+%61%6E%79%2D%6B%65%79%3D%70%65%72%63%65%6E%74%64%65%63%6F%64%65%64%76%61%6C%75%65%39
+numkey=123456789012
+numkey=abcdef123456
+decoded-only-key=zzz999secretvalue
+ZGVjb2RlZC1vbmx5LWtleT16eno5OTlzZWNyZXR2YWx1ZQ==
+ZGVlcC1rZXk9enpkZWVwc2VjcmV0OTk=
+WkdWbGNDMXJaWGs5ZW5wa1pXVndjMlZqY21WME9Uaz0=
+%73%6B%3D%61%62%63%64%65%66%67%68%69%6A%6B%6C
+%73%6B%3D%61%62%63
+`
+
+func TestDetectRulePolicy(t *testing.T) {
+	viper.Reset()
+	viper.AddConfigPath(configPath)
+	viper.SetConfigName("policy")
+	viper.SetConfigType("toml")
+	require.NoError(t, viper.ReadInConfig())
+
+	var vc config.ViperConfig
+	require.NoError(t, viper.Unmarshal(&vc))
+	cfg, err := vc.Translate()
+	require.NoError(t, err)
+	cfg.Path = filepath.Join(configPath, "policy.toml")
+
+	d := NewDetector(cfg)
+	d.MaxDecodeDepth = maxDecodeDepth
+
+	findings := d.Detect(Fragment{
+		Raw:      policyTestValues,
+		FilePath: "tmp.go",
+	})
+
+	expectedFindings := []report.Finding{
+		{ // plaintext still detected for a base64-only rule
+			RuleID:      "policy-b64-only",
+			Description: "Base64-only policy rule",
+			File:        "tmp.go",
+			Line:        "\npolicy-key=plainsecretvalue",
+			Match:       "policy-key=plainsecretvalue",
+			Secret:      "plainsecretvalue",
+			Entropy:     3.4528196,
+			StartLine:   1,
+			EndLine:     1,
+			StartColumn: 2,
+			EndColumn:   28,
+			Tags:        []string{},
+		},
+		{ // the percent-encoded policy line is NOT detected by this rule
+			RuleID:      "policy-b64-only",
+			Description: "Base64-only policy rule",
+			File:        "tmp.go",
+			Line:        "\ncG9saWN5LWtleT1lbmNvZGVkc2VjcmV0dmFsdWU=",
+			Match:       "policy-key=encodedsecretvalue",
+			Secret:      "encodedsecretvalue",
+			Entropy:     3.3027227,
+			StartLine:   3,
+			EndLine:     3,
+			StartColumn: 2,
+			EndColumn:   41,
+			Tags:        []string{"decoded:base64", "decode-depth:1"},
+		},
+		{ // opted-out rule is only found on the raw text
+			RuleID:      "policy-no-decode",
+			Description: "Decoding opt-out policy rule",
+			File:        "tmp.go",
+			Line:        "\nno-decode=plainxyz12345",
+			Match:       "no-decode=plainxyz12345",
+			Secret:      "plainxyz12345",
+			Entropy:     3.7004397,
+			StartLine:   4,
+			EndLine:     4,
+			StartColumn: 2,
+			EndColumn:   24,
+			Tags:        []string{},
+		},
+		{ // rule without a strategy is detected on raw text
+			RuleID:      "policy-any-decode",
+			Description: "Default policy rule",
+			File:        "tmp.go",
+			Line:        "\nany-key=plaindecodedvalue1",
+			Match:       "any-key=plaindecodedvalue1",
+			Secret:      "plaindecodedvalue1",
+			Entropy:     3.4193819,
+			StartLine:   6,
+			EndLine:     6,
+			StartColumn: 2,
+			EndColumn:   27,
+			Tags:        []string{},
+		},
+		{ // rule without a strategy still participates in percent decoding
+			RuleID:      "policy-any-decode",
+			Description: "Default policy rule",
+			File:        "tmp.go",
+			Line:        "\n%61%6E%79%2D%6B%65%79%3D%70%65%72%63%65%6E%74%64%65%63%6F%64%65%64%76%61%6C%75%65%39",
+			Match:       "any-key=percentdecodedvalue9",
+			Secret:      "percentdecodedvalue9",
+			Entropy:     3.4037018,
+			StartLine:   7,
+			EndLine:     7,
+			StartColumn: 2,
+			EndColumn:   85,
+			Tags:        []string{"decoded:percent", "decode-depth:1"},
+		},
+		{ // digit-only capture group satisfies the entropy condition
+			RuleID:      "policy-numeric-group",
+			Description: "Numeric capture group policy rule",
+			File:        "tmp.go",
+			Line:        "\nnumkey=123456789012",
+			Match:       "numkey=123456789012",
+			Secret:      "123456789012",
+			Entropy:     3.251629,
+			StartLine:   8,
+			EndLine:     8,
+			StartColumn: 2,
+			EndColumn:   20,
+			Tags:        []string{"entropy-cond:1:group"},
+		},
+		{ // plaintext occurrence is dropped (no decoded content on raw pass);
+			// only the base64 occurrence is reported, with condition tags.
+			RuleID:      "policy-decoded-only",
+			Description: "Decoded-only policy rule",
+			File:        "tmp.go",
+			Line:        "\nZGVjb2RlZC1vbmx5LWtleT16eno5OTlzZWNyZXR2YWx1ZQ==",
+			Match:       "decoded-only-key=zzz999secretvalue",
+			Secret:      "zzz999secretvalue",
+			Entropy:     3.2483652,
+			StartLine:   11,
+			EndLine:     11,
+			StartColumn: 2,
+			EndColumn:   49,
+			Tags:        []string{"decoded:base64", "decode-depth:1", "entropy-cond:1:decoded"},
+		},
+		{ // once-encoded value found by the depth-capped rule
+			RuleID:      "policy-deep-1",
+			Description: "Single depth policy rule",
+			File:        "tmp.go",
+			Line:        "\nZGVlcC1rZXk9enpkZWVwc2VjcmV0OTk=",
+			Match:       "deep-key=zzdeepsecret99",
+			Secret:      "zzdeepsecret99",
+			Entropy:     2.950212,
+			StartLine:   12,
+			EndLine:     12,
+			StartColumn: 2,
+			EndColumn:   33,
+			Tags:        []string{"decoded:base64", "decode-depth:1"},
+		},
+		{ // once-encoded value also found by the uncapped rule
+			RuleID:      "policy-deep-any",
+			Description: "Uncapped depth policy rule",
+			File:        "tmp.go",
+			Line:        "\nZGVlcC1rZXk9enpkZWVwc2VjcmV0OTk=",
+			Match:       "deep-key=zzdeepsecret99",
+			Secret:      "zzdeepsecret99",
+			Entropy:     2.950212,
+			StartLine:   12,
+			EndLine:     12,
+			StartColumn: 2,
+			EndColumn:   33,
+			Tags:        []string{"decoded:base64", "decode-depth:1"},
+		},
+		{ // double-encoded value only found by the uncapped rule at depth 2
+			RuleID:      "policy-deep-any",
+			Description: "Uncapped depth policy rule",
+			File:        "tmp.go",
+			Line:        "\nWkdWbGNDMXJaWGs5ZW5wa1pXVndjMlZqY21WME9Uaz0=",
+			Match:       "deep-key=zzdeepsecret99",
+			Secret:      "zzdeepsecret99",
+			Entropy:     2.950212,
+			StartLine:   13,
+			EndLine:     13,
+			StartColumn: 2,
+			EndColumn:   45,
+			Tags:        []string{"decoded:base64", "decode-depth:2"},
+		},
+		{ // long percent-decoded value satisfies the minimum decoded length;
+			// the short value on the next line is dropped with a reason.
+			RuleID:      "policy-percent-min-length",
+			Description: "Percent policy rule with minimum decoded length",
+			File:        "tmp.go",
+			Line:        "\n%73%6B%3D%61%62%63%64%65%66%67%68%69%6A%6B%6C",
+			Match:       "sk=abcdefghijkl",
+			Secret:      "abcdefghijkl",
+			Entropy:     3.5849626,
+			StartLine:   14,
+			EndLine:     14,
+			StartColumn: 2,
+			EndColumn:   46,
+			Tags:        []string{"decoded:percent", "decode-depth:1"},
+		},
+	}
+
+	compare(t, findings, expectedFindings)
+}
+
 func stripANSI(s string) string {
 	ansiRegex := regexp.MustCompile(`\x1b\[[0-9;]*m`)
 	return ansiRegex.ReplaceAllString(s, "")

@@ -1,0 +1,12 @@
+title = "gitleaks config"
+
+[[rules]]
+id = "policy-bad-lengths"
+description = "Contradictory length constraints"
+regex = '''foo=([a-z]+)'''
+
+[[rules.entropy_conditions]]
+target = "match"
+threshold = 3.0
+minLength = 50
+maxLength = 10

@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/zricethezav/gitleaks/v8/detect/codec"
 	"github.com/zricethezav/gitleaks/v8/regexp"
 )
 
@@ -88,6 +89,36 @@ func TestTranslate(t *testing.T) {
 				}},
 			},
 		},
+		{
+			cfgName: "valid/rule_policy",
+			cfg: Config{
+				Title: "gitleaks config",
+				Rules: map[string]Rule{"policy-rule": {
+					RuleID:      "policy-rule",
+					Description: "Rule with a full decoding and entropy policy",
+					Regex:       regexp.MustCompile(`token=([a-z0-9]+)`),
+					Keywords:    []string{},
+					Tags:        []string{},
+					Strategy: &Strategy{
+						EnabledEncodings:  codec.Base64Kind | codec.HexKind,
+						EncodingsDeclared: true,
+						MaxDepth:          2,
+						MinDecodedLength:  8,
+						Conditions: []*EntropyCondition{
+							{
+								Index:     1,
+								Target:    EntropyTargetGroup,
+								Group:     1,
+								Threshold: 3.5,
+								MinLength: 10,
+								MaxLength: 100,
+								Charset:   "0123456789abcdefABCDEF",
+							},
+						},
+					},
+				}},
+			},
+		},
 
 		// Invalid
 		{
@@ -104,6 +135,41 @@ func TestTranslate(t *testing.T) {
 			cfgName:   "invalid/rule_bad_entropy_group",
 			cfg:       Config{},
 			wantError: errors.New("discord-api-key: invalid regex secret group 5, max regex secret group 3"),
+		},
+		{
+			cfgName:   "invalid/policy_bad_encoding",
+			cfg:       Config{},
+			wantError: errors.New(`policy-bad-encoding: unknown encoding "rot13" (expected one of: percent, unicode, hex, base64)`),
+		},
+		{
+			cfgName:   "invalid/policy_bad_group",
+			cfg:       Config{},
+			wantError: errors.New("policy-bad-group: entropy condition #1 references capture group 3 but the regex only has 1 group(s)"),
+		},
+		{
+			cfgName:   "invalid/policy_bad_lengths",
+			cfg:       Config{},
+			wantError: errors.New("policy-bad-lengths: entropy condition #1 is contradictory, |minLength| 50 is greater than |maxLength| 10"),
+		},
+		{
+			cfgName:   "invalid/policy_decoded_without_encodings",
+			cfg:       Config{},
+			wantError: errors.New("policy-decoded-without-encodings: entropy condition #1 targets the decoded value but |decoding.encodings| is empty, the condition can never be satisfied"),
+		},
+		{
+			cfgName:   "invalid/policy_bad_threshold",
+			cfg:       Config{},
+			wantError: errors.New("policy-bad-threshold: entropy condition #1 has an invalid |threshold| 0, it must be greater than 0"),
+		},
+		{
+			cfgName:   "invalid/policy_bad_target",
+			cfg:       Config{},
+			wantError: errors.New(`policy-bad-target: unknown entropy condition |target| "line" (expected 'match', 'group', or 'decoded')`),
+		},
+		{
+			cfgName:   "invalid/policy_entropy_and_conditions",
+			cfg:       Config{},
+			wantError: errors.New("policy-entropy-and-conditions: |entropy| cannot be combined with [[rules.entropy_conditions]], remove one of them"),
 		},
 	}
 	for _, tt := range tests {
@@ -616,7 +682,7 @@ func testTranslate(t *testing.T, test translateCase) {
 
 	opts := cmp.Options{
 		cmp.Comparer(regexComparer),
-		cmpopts.IgnoreUnexported(Rule{}, Allowlist{}),
+		cmpopts.IgnoreUnexported(Rule{}, Allowlist{}, EntropyCondition{}),
 	}
 	if diff := cmp.Diff(test.cfg.Title, cfg.Title); diff != "" {
 		t.Errorf("%s diff: (-want +got)\n%s", test.cfgName, diff)

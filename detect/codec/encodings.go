@@ -4,15 +4,17 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync"
 
 	"github.com/zricethezav/gitleaks/v8/regexp"
 )
 
+// EncodingKind is exported so other packages (e.g. config) can reference the
+// supported encoding types. encodingKind can be or'd together to capture all
+// of the unique encodings that were present in a segment.
+type EncodingKind = encodingKind
+
 var (
-	// encodingsRe is a regex built by combining all the encoding patterns
-	// into named capture groups so that a single pass can detect multiple
-	// encodings
-	encodingsRe *regexp.Regexp
 	// encodings contains all the encoding configurations for the detector.
 	// The precedence is important. You want more specific encodings to
 	// have a higher precedence or encodings that partially encode the
@@ -41,15 +43,27 @@ var (
 			decode:  decodeBase64,
 		},
 	}
+
+	// encodingNames is used to map the encodingKinds to their name
+	encodingNames = []string{
+		"percent",
+		"unicode",
+		"hex",
+		"base64",
+	}
 )
 
-// encodingNames is used to map the encodingKinds to their name
-var encodingNames = []string{
-	"percent",
-	"unicode",
-	"hex",
-	"base64",
-}
+// Exported encoding kinds so callers can construct decoders limited to a
+// subset of the supported encodings.
+const (
+	PercentKind = encodingKind(1)
+	UnicodeKind = encodingKind(2)
+	HexKind     = encodingKind(4)
+	Base64Kind  = encodingKind(8)
+)
+
+// AllEncodingKinds or's together every supported encoding kind.
+const AllEncodingKinds = PercentKind | UnicodeKind | HexKind | Base64Kind
 
 // encodingKind can be or'd together to capture all of the unique encodings
 // that were present in a segment
@@ -57,10 +71,10 @@ type encodingKind int
 
 var (
 	// make sure these go up by powers of 2
-	percentKind = encodingKind(1)
-	unicodeKind = encodingKind(2)
-	hexKind     = encodingKind(4)
-	base64Kind  = encodingKind(8)
+	percentKind = PercentKind
+	unicodeKind = UnicodeKind
+	hexKind     = HexKind
+	base64Kind  = Base64Kind
 )
 
 func (e encodingKind) String() string {
@@ -84,6 +98,29 @@ func (e encodingKind) kinds() []encodingKind {
 	return kinds
 }
 
+// ParseEncodingKinds converts a list of encoding names (e.g. "base64") into
+// an or'd together encodingKind. Names are case-insensitive.
+func ParseEncodingKinds(names []string) (encodingKind, error) {
+	var kinds encodingKind
+	for _, name := range names {
+		var found encodingKind
+		switch strings.ToLower(strings.TrimSpace(name)) {
+		case "percent":
+			found = PercentKind
+		case "unicode":
+			found = UnicodeKind
+		case "hex":
+			found = HexKind
+		case "base64":
+			found = Base64Kind
+		default:
+			return 0, fmt.Errorf("unknown encoding %q (expected one of: %s)", name, strings.Join(encodingNames, ", "))
+		}
+		kinds |= found
+	}
+	return kinds, nil
+}
+
 // encodingMatch represents a match of an encoding in the text
 type encodingMatch struct {
 	encoding *encoding
@@ -102,29 +139,76 @@ type encoding struct {
 	precedence int
 }
 
+var (
+	// encodingReses caches the combined encoding regex for each subset of
+	// encoding kinds. The all-kinds entry is populated up front by init for
+	// backwards compatibility.
+	encodingReses = map[encodingKind]*regexp.Regexp{
+		AllEncodingKinds: nil,
+	}
+	encodingResesMu sync.Mutex
+)
+
 func init() {
+	// Assign precedence based on the position in the global |encodings|
+	// slice so that a subset of encodings keeps the exact same relative
+	// precedence as the full set.
 	count := len(encodings)
-	namedPatterns := make([]string, count)
 	for i, encoding := range encodings {
 		encoding.precedence = count - i
-		namedPatterns[i] = fmt.Sprintf(
+	}
+	encodingReses[AllEncodingKinds] = buildEncodingsRe(AllEncodingKinds)
+}
+
+// buildEncodingsRe combines the patterns of the encodings contained in |mask|
+// into named capture groups so a single regex pass can detect each of them.
+// The relative precedence of the encodings is identical regardless of which
+// subset is selected.
+func buildEncodingsRe(mask encodingKind) *regexp.Regexp {
+	namedPatterns := make([]string, 0, len(encodings))
+	for _, encoding := range encodings {
+		if mask&encoding.kind == 0 {
+			continue
+		}
+		namedPatterns = append(namedPatterns, fmt.Sprintf(
 			"(?P<%s>%s)",
 			encoding.kind,
 			encoding.pattern,
-		)
+		))
 	}
-	encodingsRe = regexp.MustCompile(strings.Join(namedPatterns, "|"))
+	return regexp.MustCompile(strings.Join(namedPatterns, "|"))
 }
 
-// findEncodingMatches finds as many encodings as it can for this pass
-func findEncodingMatches(data string) []encodingMatch {
+// encodingsReFor returns the cached combined regex for the given subset of
+// encoding kinds, building it on first use.
+func encodingsReFor(mask encodingKind) *regexp.Regexp {
+	encodingResesMu.Lock()
+	defer encodingResesMu.Unlock()
+	if re, ok := encodingReses[mask]; ok {
+		return re
+	}
+	re := buildEncodingsRe(mask)
+	encodingReses[mask] = re
+	return re
+}
+
+// findEncodingMatches finds as many encodings enabled by |mask| as it can for
+// this pass
+func findEncodingMatches(data string, mask encodingKind) []encodingMatch {
 	var all []encodingMatch
-	for _, matchIndex := range encodingsRe.FindAllStringSubmatchIndex(data, -1) {
+	enabled := make([]*encoding, 0, len(encodings))
+	for _, encoding := range encodings {
+		if mask&encoding.kind != 0 {
+			enabled = append(enabled, encoding)
+		}
+	}
+
+	for _, matchIndex := range encodingsReFor(mask).FindAllStringSubmatchIndex(data, -1) {
 		// Add the encodingMatch with its proper encoding
 		for i, j := 2, 0; i < len(matchIndex); i, j = i+2, j+1 {
 			if matchIndex[i] > -1 {
 				all = append(all, encodingMatch{
-					encoding: encodings[j],
+					encoding: enabled[j],
 					startEnd: startEnd{
 						start: matchIndex[i],
 						end:   matchIndex[i+1],

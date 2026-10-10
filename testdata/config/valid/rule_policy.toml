@@ -1,0 +1,19 @@
+title = "gitleaks config"
+
+[[rules]]
+id = "policy-rule"
+description = "Rule with a full decoding and entropy policy"
+regex = '''token=([a-z0-9]+)'''
+
+[rules.decoding]
+encodings = ["base64", "hex"]
+maxDepth = 2
+minLength = 8
+
+[[rules.entropy_conditions]]
+target = "group"
+group = 1
+threshold = 3.5
+minLength = 10
+maxLength = 100
+charset = "hex"

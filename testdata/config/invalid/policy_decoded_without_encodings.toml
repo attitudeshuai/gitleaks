@@ -1,0 +1,13 @@
+title = "gitleaks config"
+
+[[rules]]
+id = "policy-decoded-without-encodings"
+description = "Decoded target but the rule opts out of every encoding"
+regex = '''foo=([a-z]+)'''
+
+[rules.decoding]
+encodings = []
+
+[[rules.entropy_conditions]]
+target = "decoded"
+threshold = 3.0

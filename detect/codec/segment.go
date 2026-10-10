@@ -2,6 +2,7 @@ package codec
 
 import (
 	"fmt"
+	"strings"
 )
 
 // EncodedSegment represents a portion of text that is encoded in some way.
@@ -131,6 +132,27 @@ func SegmentsWithDecodedOverlap(segments []*EncodedSegment, start, end int) []*E
 	}
 
 	return overlaps
+}
+
+// DecodedValue returns the decoded text covered by |segments| within the
+// [start,end) range of the current decoding pass. Only portions of decoded
+// segments intersecting the range are included, in the order they appear.
+// An empty string means the range does not overlap any decoded content.
+func DecodedValue(segments []*EncodedSegment, currentRaw string, start, end int) string {
+	if len(segments) == 0 || start >= end || start < 0 || end > len(currentRaw) {
+		return ""
+	}
+
+	var sb strings.Builder
+	for _, segment := range segments {
+		lo := max(start, segment.decoded.start)
+		hi := min(end, segment.decoded.end)
+		if hi > lo {
+			sb.WriteString(currentRaw[lo:hi])
+		}
+	}
+
+	return sb.String()
 }
 
 // toOriginal maps a start/end to its start/end in the original text

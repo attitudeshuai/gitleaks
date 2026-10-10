@@ -8,14 +8,34 @@ import (
 
 // Decoder decodes various types of data in place
 type Decoder struct {
+	// kinds is the subset of encodings this decoder is allowed to use. When
+	// zero (the default) all encodings are enabled.
+	kinds encodingKind
+
 	decodedMap map[string]string
 }
 
-// NewDecoder creates a default decoder struct
-func NewDecoder() *Decoder {
+// NewDecoder creates a decoder. When no encoding kinds are provided the
+// decoder uses every supported encoding. Providing a subset limits the
+// decoder to just those encodings, which allows individual rules to declare
+// which encoding paths they participate in.
+func NewDecoder(kinds ...EncodingKind) *Decoder {
+	var mask encodingKind
+	for _, kind := range kinds {
+		mask |= kind
+	}
+	if mask == 0 {
+		mask = AllEncodingKinds
+	}
 	return &Decoder{
+		kinds:      mask,
 		decodedMap: make(map[string]string),
 	}
+}
+
+// Kinds returns the encoding kinds the decoder is limited to.
+func (d *Decoder) Kinds() EncodingKind {
+	return d.kinds
 }
 
 // Decode returns the data with the values decoded in place along with the
@@ -46,7 +66,7 @@ func (d *Decoder) findEncodedSegments(data string, predecessors []*EncodedSegmen
 	}
 
 	decodedShift := 0
-	encodingMatches := findEncodingMatches(data)
+	encodingMatches := findEncodingMatches(data, d.kinds)
 	segments := make([]*EncodedSegment, 0, len(encodingMatches))
 	for _, m := range encodingMatches {
 		encodedValue := data[m.start:m.end]

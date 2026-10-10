@@ -1,0 +1,9 @@
+title = "gitleaks config"
+
+[[rules]]
+id = "policy-bad-encoding"
+description = "Unknown encoding"
+regex = '''foo=([a-z]+)'''
+
+[rules.decoding]
+encodings = ["base64", "rot13"]

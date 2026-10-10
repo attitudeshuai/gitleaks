@@ -1,0 +1,12 @@
+title = "gitleaks config"
+
+[[rules]]
+id = "policy-entropy-and-conditions"
+description = "Legacy entropy combined with entropy conditions"
+regex = '''foo=([a-z]+)'''
+entropy = 3.0
+
+[[rules.entropy_conditions]]
+target = "group"
+group = 1
+threshold = 3.5
