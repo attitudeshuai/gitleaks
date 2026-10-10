@@ -283,6 +283,7 @@ type Git struct {
 	Remote          *RemoteInfo
 	Sema            *semgroup.Group
 	MaxArchiveDepth int
+	ArchiveLimits   *ArchiveLimits
 }
 
 // CommitInfo captures metadata about the commit
@@ -307,7 +308,23 @@ func (s *Git) Fragments(ctx context.Context, yield FragmentsFunc) error {
 		diffFilesCh = s.Cmd.DiffFilesCh()
 		errCh       = s.Cmd.ErrCh()
 		wg          sync.WaitGroup
+
+		limitErr  error
+		limitLock sync.Mutex
 	)
+
+	// captureLimit records the first archive-limit error from a worker.
+	captureLimit := func(err error) {
+		var le *ArchiveLimitError
+		if !errors.As(err, &le) {
+			return
+		}
+		limitLock.Lock()
+		if limitErr == nil {
+			limitErr = err
+		}
+		limitLock.Unlock()
+	}
 
 	// loop to range over both DiffFiles (stdout) and ErrCh (stderr)
 	for diffFilesCh != nil || errCh != nil {
@@ -374,6 +391,7 @@ func (s *Git) Fragments(ctx context.Context, yield FragmentsFunc) error {
 						Path:            gitdiffFile.NewName,
 						MaxArchiveDepth: s.MaxArchiveDepth,
 						Config:          s.Config,
+						ArchiveLimits:   s.ArchiveLimits,
 					}
 
 					// enrich and yield fragments
@@ -388,7 +406,10 @@ func (s *Git) Fragments(ctx context.Context, yield FragmentsFunc) error {
 						logging.Debug().Err(err).Msg("blobReader.Close() returned an error")
 					}
 
-					return err
+					if err != nil {
+						captureLimit(err)
+					}
+					return nil
 				}
 
 				for _, textFragment := range gitdiffFile.TextFragments {
@@ -426,7 +447,7 @@ func (s *Git) Fragments(ctx context.Context, yield FragmentsFunc) error {
 		return ctx.Err()
 	default:
 		wg.Wait()
-		return nil
+		return limitErr
 	}
 }
 

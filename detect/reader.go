@@ -17,6 +17,7 @@ func (d *Detector) DetectReader(r io.Reader, bufSize int) ([]report.Finding, err
 		Content:         r,
 		Buffer:          make([]byte, 1000*bufSize),
 		MaxArchiveDepth: d.MaxArchiveDepth,
+		ArchiveLimits:   d.ArchiveLimits,
 	}
 
 	ctx := context.Background()
@@ -80,6 +81,7 @@ func (d *Detector) StreamDetectReader(r io.Reader, bufSize int) (<-chan report.F
 		Content:         r,
 		Buffer:          make([]byte, 1000*bufSize),
 		MaxArchiveDepth: d.MaxArchiveDepth,
+		ArchiveLimits:   d.ArchiveLimits,
 	}
 
 	go func() {

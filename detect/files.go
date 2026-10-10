@@ -70,6 +70,7 @@ func (d *Detector) DetectFiles(scanTargets <-chan sources.ScanTarget) ([]report.
 				Symlink:         scanTarget.Symlink,
 				Config:          &d.Config,
 				MaxArchiveDepth: d.MaxArchiveDepth,
+				ArchiveLimits:   d.ArchiveLimits,
 			}
 
 			ctx := context.Background()

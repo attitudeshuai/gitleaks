@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"github.com/zricethezav/gitleaks/v8/logging"
 	"github.com/zricethezav/gitleaks/v8/regexp"
 	"github.com/zricethezav/gitleaks/v8/report"
+	"github.com/zricethezav/gitleaks/v8/sources"
 	"github.com/zricethezav/gitleaks/v8/version"
 )
 
@@ -90,6 +92,11 @@ func init() {
 	rootCmd.PersistentFlags().StringP("gitleaks-ignore-path", "i", ".", "path to .gitleaksignore file or folder containing one")
 	rootCmd.PersistentFlags().Int("max-decode-depth", 5, "allow recursive decoding up to this depth")
 	rootCmd.PersistentFlags().Int("max-archive-depth", 0, "allow scanning into nested archives up to this depth (default \"0\", no archive traversal is done)")
+	rootCmd.PersistentFlags().Int64("max-archive-entry-size", 0, "skip extracting archive inner entries larger than this many bytes (default \"0\", no limit)")
+	rootCmd.PersistentFlags().Int64("max-archive-total-size", 0, "limit the total bytes extracted from a single archive (default \"0\", no limit)")
+	rootCmd.PersistentFlags().Int64("max-archive-entries", 0, "limit the number of entries extracted from a single archive (default \"0\", no limit)")
+	rootCmd.PersistentFlags().Float64("max-archive-compression-ratio", 0, "limit the uncompressed/compressed size ratio of an archive entry (default \"0\", no limit)")
+	rootCmd.PersistentFlags().String("archive-limit-action", "skip-entries", "action when an archive extraction limit is reached (skip-entries, skip-archive, abort-source)")
 	rootCmd.PersistentFlags().Int("timeout", 0, "set a timeout for gitleaks commands in seconds (default \"0\", no timeout is set)")
 
 	// Add diagnostics flags
@@ -246,6 +253,88 @@ func Config(cmd *cobra.Command) config.Config {
 	return cfg
 }
 
+// archiveLimits builds the archive extraction limits from command flags.
+//
+// Limits default to unset (nil) so existing scans are unchanged. Explicitly
+// provided values must be positive; invalid values produce an error before
+// scanning begins.
+func archiveLimits(cmd *cobra.Command) (*sources.ArchiveLimits, error) {
+	var (
+		limits sources.ArchiveLimits
+		anySet bool
+	)
+
+	if cmd.Flags().Changed("max-archive-entry-size") {
+		v, err := cmd.Flags().GetInt64("max-archive-entry-size")
+		if err != nil {
+			return nil, err
+		}
+		if v <= 0 {
+			return nil, errors.New("--max-archive-entry-size must be greater than 0")
+		}
+		limits.MaxEntryBytes = v
+		anySet = true
+	}
+
+	if cmd.Flags().Changed("max-archive-total-size") {
+		v, err := cmd.Flags().GetInt64("max-archive-total-size")
+		if err != nil {
+			return nil, err
+		}
+		if v <= 0 {
+			return nil, errors.New("--max-archive-total-size must be greater than 0")
+		}
+		limits.MaxTotalBytes = v
+		anySet = true
+	}
+
+	if cmd.Flags().Changed("max-archive-entries") {
+		v, err := cmd.Flags().GetInt64("max-archive-entries")
+		if err != nil {
+			return nil, err
+		}
+		if v <= 0 {
+			return nil, errors.New("--max-archive-entries must be greater than 0")
+		}
+		limits.MaxEntries = v
+		anySet = true
+	}
+
+	if cmd.Flags().Changed("max-archive-compression-ratio") {
+		v, err := cmd.Flags().GetFloat64("max-archive-compression-ratio")
+		if err != nil {
+			return nil, err
+		}
+		if v <= 0 {
+			return nil, errors.New("--max-archive-compression-ratio must be greater than 0")
+		}
+		limits.MaxCompressionRatio = v
+		anySet = true
+	}
+
+	action, err := cmd.Flags().GetString("archive-limit-action")
+	if err != nil {
+		return nil, err
+	}
+	switch sources.ArchiveLimitAction(action) {
+	case sources.ArchiveLimitSkipEntries,
+		sources.ArchiveLimitSkipArchive,
+		sources.ArchiveLimitAbortSource:
+		limits.OnLimit = sources.ArchiveLimitAction(action)
+	default:
+		return nil, fmt.Errorf("--archive-limit-action must be one of skip-entries, skip-archive, abort-source (got %q)", action)
+	}
+
+	if err := limits.Validate(); err != nil {
+		return nil, err
+	}
+
+	if !anySet {
+		return nil, nil
+	}
+	return &limits, nil
+}
+
 func Detector(cmd *cobra.Command, cfg config.Config, source string) *detect.Detector {
 	var err error
 
@@ -258,6 +347,11 @@ func Detector(cmd *cobra.Command, cfg config.Config, source string) *detect.Dete
 
 	if detector.MaxArchiveDepth, err = cmd.Flags().GetInt("max-archive-depth"); err != nil {
 		logging.Fatal().Err(err).Send()
+	}
+
+	// Archive extraction limits; invalid values abort before scanning.
+	if detector.ArchiveLimits, err = archiveLimits(cmd); err != nil {
+		logging.Fatal().Err(err).Msg("invalid archive limit")
 	}
 
 	// set color flag at first

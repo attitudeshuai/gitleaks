@@ -27,9 +27,11 @@ func createScmLink(remote *sources.RemoteInfo, finding report.Finding) string {
 		return ""
 	}
 
-	// Clean the path.
-	filePath, _, hasInnerPath := strings.Cut(finding.File, sources.InnerPathSeparator)
-	filePath = linkCleaner.Replace(filePath)
+	// Restore the path segments and take the repository file (outermost
+	// segment); boundaries respect the inner-path escaping.
+	pathSegments := sources.SplitFullPath(finding.File)
+	filePath := linkCleaner.Replace(pathSegments[0])
+	hasInnerPath := len(pathSegments) > 1
 
 	switch remote.Platform {
 	case scm.GitHubPlatform:

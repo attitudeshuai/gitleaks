@@ -25,6 +25,7 @@ func (d *Detector) DetectGit(cmd *sources.GitCmd, remote *RemoteInfo) ([]report.
 			Remote:          (*sources.RemoteInfo)(remote),
 			Sema:            d.Sema,
 			MaxArchiveDepth: d.MaxArchiveDepth,
+			ArchiveLimits:   d.ArchiveLimits,
 		},
 	)
 }

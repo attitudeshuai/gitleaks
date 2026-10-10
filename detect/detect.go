@@ -3,6 +3,7 @@ package detect
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -53,6 +54,9 @@ type Detector struct {
 
 	// MaxArchiveDepth limits how deep the sources will explore nested archives
 	MaxArchiveDepth int
+
+	// ArchiveLimits configures extraction limits applied to archive sources
+	ArchiveLimits *sources.ArchiveLimits
 
 	// files larger than this will be skipped
 	MaxTargetMegaBytes int
@@ -226,6 +230,13 @@ func (d *Detector) DetectSource(ctx context.Context, source sources.Source) ([]r
 		logger := logContext.Logger()
 
 		if err != nil {
+			// Archive extraction limits are handled with their configured
+			// action; other errors are logged and skipped.
+			var limitErr *sources.ArchiveLimitError
+			if errors.As(err, &limitErr) {
+				return d.handleArchiveLimit(limitErr)
+			}
+
 			// Log the error and move on to the next fragment
 			logger.Error().Err(err).Send()
 			return nil
@@ -751,6 +762,64 @@ func (d *Detector) AddFinding(finding report.Finding) {
 // Findings returns the findings added to the detector
 func (d *Detector) Findings() []report.Finding {
 	return d.findings
+}
+
+// handleArchiveLimit applies the configured action for an archive that reached
+// an extraction limit. The error is returned (and propagated) only for the
+// abort-source action.
+func (d *Detector) handleArchiveLimit(e *sources.ArchiveLimitError) error {
+	event := logging.Warn().
+		Str("archive", e.Archive).
+		Str("limit", e.Reason)
+	if e.Inner != "" {
+		event = event.Str("inner", e.Inner)
+	}
+
+	switch e.Action {
+	case sources.ArchiveLimitAbortSource:
+		event.Msg("aborting source: archive extraction limit reached")
+		return e
+	case sources.ArchiveLimitSkipArchive:
+		d.suppressArchiveFindings(e.Archive)
+		event.Msg("skipping archive: archive extraction limit reached")
+		return nil
+	default:
+		event.Msg("skipping remaining entries: archive extraction limit reached")
+		return nil
+	}
+}
+
+// suppressArchiveFindings removes findings located inside the archive
+// identified by |archiveFullPath|, including findings from nested archives.
+func (d *Detector) suppressArchiveFindings(archiveFullPath string) {
+	target := sources.SplitFullPath(archiveFullPath)
+
+	d.findingMutex.Lock()
+	defer d.findingMutex.Unlock()
+
+	kept := d.findings[:0]
+	for _, f := range d.findings {
+		if findingInsideArchive(f.File, target) {
+			continue
+		}
+		kept = append(kept, f)
+	}
+	d.findings = kept
+}
+
+// findingInsideArchive reports whether the encoded finding path is contained
+// within the archive described by |target| segments.
+func findingInsideArchive(findingFile string, target []string) bool {
+	segments := sources.SplitFullPath(findingFile)
+	if len(segments) < len(target) {
+		return false
+	}
+	for i := range target {
+		if segments[i] != target[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // AddCommit synchronously adds a commit to the commit slice

@@ -1,8 +1,10 @@
 package detect
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -2768,6 +2770,284 @@ func TestWindowsFileSeparator_RuleAllowlistPaths(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			actual := d.detectRule(test.fragment, test.fragment.Raw, test.rule, []*codec.EncodedSegment{})
 			compare(t, test.expected, actual)
+		})
+	}
+}
+
+// newArchivesDetector builds a detector using the archives test config.
+func newArchivesDetector(t *testing.T) *Detector {
+	t.Helper()
+
+	viper.AddConfigPath(configPath)
+	viper.SetConfigName("archives")
+	viper.SetConfigType("toml")
+	require.NoError(t, viper.ReadInConfig())
+
+	var vc config.ViperConfig
+	require.NoError(t, viper.Unmarshal(&vc))
+
+	cfg, err := vc.Translate()
+	require.NoError(t, err)
+
+	detector := NewDetector(cfg)
+	detector.MaxArchiveDepth = 8
+	return detector
+}
+
+// TestGitArchiveLimits verifies extraction limits apply to archive objects
+// encountered during git scans (here a zst blob containing main.go content).
+func TestGitArchiveLimits(t *testing.T) {
+	// TODO: this fails on Windows due to CRLF in testdata packed-refs
+	// (see TestFromGit); unrelated to archive limits.
+	if runtime.GOOS == "windows" {
+		t.Skipf("TODO: this fails on Windows: [git] fatal: bad object refs/heads/main?")
+	}
+
+	moveDotGit(t, "dotGit", ".git")
+	defer moveDotGit(t, ".git", "dotGit")
+
+	source := filepath.Join(repoBasePath, "archives")
+
+	setup := func(t *testing.T, limits *sources.ArchiveLimits) (*Detector, []report.Finding, error) {
+		t.Helper()
+
+		viper.AddConfigPath(configPath)
+		viper.SetConfigName("archives")
+		viper.SetConfigType("toml")
+		require.NoError(t, viper.ReadInConfig())
+
+		var vc config.ViperConfig
+		require.NoError(t, viper.Unmarshal(&vc))
+		cfg, err := vc.Translate()
+		require.NoError(t, err)
+
+		gitCmd, err := sources.NewGitLogCmd(source, "")
+		require.NoError(t, err)
+
+		detector := NewDetector(cfg)
+		detector.MaxArchiveDepth = 8
+		detector.ArchiveLimits = limits
+
+		remote := NewRemoteInfo(scm.UnknownPlatform, source)
+		findings, err := detector.DetectGit(gitCmd, remote)
+		return detector, findings, err
+	}
+
+	// No limits: one finding from main.go.zst.
+	_, findings, err := setup(t, nil)
+	require.NoError(t, err)
+	require.Len(t, findings, 1)
+
+	// Entry-size limit: decompressed blob (285 bytes) blocked.
+	_, findings, err = setup(t, &sources.ArchiveLimits{MaxEntryBytes: 100})
+	require.NoError(t, err)
+	require.Empty(t, findings)
+}
+
+// TestArchiveLimits verifies extraction limits against files.zip.
+//
+// files.zip non-directory entry order:
+//  1. files/.env.prod        (global allowlist)
+//  2. files/.gitleaksignore
+//  3. files/api.go           (finding)
+//  4. files/main.go          (finding)
+func TestArchiveLimits(t *testing.T) {
+	cases := []struct {
+		name         string
+		limits       *sources.ArchiveLimits
+		wantFindings int
+		wantErr      bool
+	}{
+		{name: "no limits (current behavior)", limits: nil, wantFindings: 2},
+
+		// Entry count.
+		{name: "max entries 1 skip-entries", limits: &sources.ArchiveLimits{MaxEntries: 1}, wantFindings: 0},
+		{name: "max entries 3 skip-entries", limits: &sources.ArchiveLimits{MaxEntries: 3}, wantFindings: 1},
+		{name: "max entries 4 skip-entries", limits: &sources.ArchiveLimits{MaxEntries: 4}, wantFindings: 2},
+
+		// Actions.
+		{
+			name:         "max entries 3 skip-archive",
+			limits:       &sources.ArchiveLimits{MaxEntries: 3, OnLimit: sources.ArchiveLimitSkipArchive},
+			wantFindings: 0,
+		},
+		{
+			name:         "max entries 3 abort-source",
+			limits:       &sources.ArchiveLimits{MaxEntries: 3, OnLimit: sources.ArchiveLimitAbortSource},
+			wantFindings: 1,
+			wantErr:      true,
+		},
+
+		// Per-entry size.
+		{name: "max entry bytes 100", limits: &sources.ArchiveLimits{MaxEntryBytes: 100}, wantFindings: 0},
+		{name: "max entry bytes 300", limits: &sources.ArchiveLimits{MaxEntryBytes: 300}, wantFindings: 2},
+
+		// Per-archive total.
+		{name: "max total bytes 200", limits: &sources.ArchiveLimits{MaxTotalBytes: 200}, wantFindings: 0},
+		{name: "max total bytes 1000", limits: &sources.ArchiveLimits{MaxTotalBytes: 1000}, wantFindings: 2},
+
+		// Compression ratio.
+		{name: "max ratio 1", limits: &sources.ArchiveLimits{MaxCompressionRatio: 1}, wantFindings: 0},
+		{name: "max ratio 10", limits: &sources.ArchiveLimits{MaxCompressionRatio: 10}, wantFindings: 2},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			detector := newArchivesDetector(t)
+
+			findings, err := detector.DetectSource(
+				context.Background(),
+				&sources.Files{
+					Path:            filepath.Join(archivesBasePath, "files.zip"),
+					Sema:            detector.Sema,
+					Config:          &detector.Config,
+					MaxArchiveDepth: detector.MaxArchiveDepth,
+					ArchiveLimits:   tt.limits,
+				},
+			)
+
+			if tt.wantErr {
+				require.Error(t, err)
+				var limitErr *sources.ArchiveLimitError
+				require.True(t, errors.As(err, &limitErr))
+			} else {
+				require.NoError(t, err)
+			}
+			require.Len(t, findings, tt.wantFindings)
+		})
+	}
+}
+
+// TestArchiveLimitsIndependence verifies totals and entry counts are tracked
+// per archive so sibling and nested archives do not affect each other.
+func TestArchiveLimitsIndependence(t *testing.T) {
+	detector := newArchivesDetector(t)
+
+	findings, err := detector.DetectSource(
+		context.Background(),
+		&sources.Files{
+			Path:            archivesBasePath,
+			Sema:            detector.Sema,
+			Config:          &detector.Config,
+			MaxArchiveDepth: detector.MaxArchiveDepth,
+			ArchiveLimits: &sources.ArchiveLimits{
+				MaxEntries: 3,
+			},
+		},
+	)
+	require.NoError(t, err)
+
+	containers := make(map[string]struct{})
+	for _, f := range findings {
+		if idx := lastInnerBoundary(f.File); idx > 0 {
+			containers[f.File[:idx]] = struct{}{}
+		}
+	}
+
+	// At least: files.tar, files.zip, files.tar.xz, files.tar.zst and two
+	// nested children must each have produced the api.go finding.
+	require.GreaterOrEqual(t, len(containers), 5, "limits must be tracked per archive")
+}
+
+// lastInnerBoundary returns the byte index of the last unescaped inner-path
+// separator, or -1 when the path has no inner layer.
+func lastInnerBoundary(full string) int {
+	last := -1
+	for i := 0; i < len(full); i++ {
+		switch full[i] {
+		case '\\':
+			if i+1 < len(full) && (full[i+1] == '\\' || full[i+1] == '!') {
+				i++
+			}
+		case '!':
+			last = i
+		}
+	}
+	return last
+}
+
+// makeZipReader builds an in-memory zip from the ordered entries.
+func makeZipReader(t *testing.T, names []string, content string) *bytes.Reader {
+	t.Helper()
+
+	buf := new(bytes.Buffer)
+	zw := zip.NewWriter(buf)
+	for _, name := range names {
+		w, err := zw.Create(name)
+		require.NoError(t, err)
+		_, err = w.Write([]byte(content))
+		require.NoError(t, err)
+	}
+	require.NoError(t, zw.Close())
+	return bytes.NewReader(buf.Bytes())
+}
+
+// TestInnerPathSpecialChars verifies that "!", spaces and backslashes in
+// inner entry paths round-trip through the report File field.
+func TestInnerPathSpecialChars(t *testing.T) {
+	detector := newArchivesDetector(t)
+
+	entryName := `dir/weird! name\f.go`
+	zipReader := makeZipReader(t, []string{entryName}, `awsToken := "AKIALALEMEL33243OLIA"`+"\n")
+
+	findings, err := detector.DetectSource(
+		context.Background(),
+		&sources.File{
+			Content:         zipReader,
+			Path:            "weird.zip",
+			MaxArchiveDepth: 8,
+		},
+	)
+	require.NoError(t, err)
+	require.Len(t, findings, 1)
+
+	segments := sources.SplitFullPath(findings[0].File)
+	require.Equal(t, []string{"weird.zip", entryName}, segments)
+}
+
+// TestScmLinkInnerPathSpecials verifies commit links restore the correct
+// repository file from encoded inner paths.
+func TestScmLinkInnerPathSpecials(t *testing.T) {
+	const commit = "abc123def456789"
+	remote := &sources.RemoteInfo{
+		Platform: scm.GitHubPlatform,
+		Url:      "https://github.com/org/repo",
+	}
+
+	cases := []struct {
+		name string
+		file string
+		want string
+	}{
+		{
+			name: "escaped exclamation",
+			file: `weird.zip!dir/weird\!f.go`,
+			want: "https://github.com/org/repo/blob/" + commit + "/weird.zip",
+		},
+		{
+			name: "space encoded",
+			file: `my dir/files.zip!x\!y.go`,
+			want: "https://github.com/org/repo/blob/" + commit + "/my%20dir/files.zip",
+		},
+		{
+			name: "percent encoded",
+			file: `100%.zip!a.go`,
+			want: "https://github.com/org/repo/blob/" + commit + "/100%25.zip",
+		},
+		{
+			name: "plain file",
+			file: "main.go",
+			want: "https://github.com/org/repo/blob/" + commit + "/main.go",
+		},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			finding := report.Finding{
+				File:   tt.file,
+				Commit: commit,
+			}
+			require.Equal(t, tt.want, createScmLink(remote, finding))
 		})
 	}
 }

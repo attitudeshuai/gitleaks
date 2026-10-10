@@ -54,6 +54,7 @@ type Files struct {
 	Path            string
 	Sema            *semgroup.Group
 	MaxArchiveDepth int
+	ArchiveLimits   *ArchiveLimits
 }
 
 // scanTargets yields scan targets to a callback func
@@ -140,7 +141,24 @@ func (s *Files) scanTargets(ctx context.Context, yield func(ScanTarget, error) e
 
 // Fragments yields fragments from files discovered under the path
 func (s *Files) Fragments(ctx context.Context, yield FragmentsFunc) error {
-	var wg sync.WaitGroup
+	var (
+		wg        sync.WaitGroup
+		limitErr  error
+		limitLock sync.Mutex
+	)
+
+	// captureLimit records the first archive-limit error from a worker.
+	captureLimit := func(err error) {
+		var le *ArchiveLimitError
+		if !errors.As(err, &le) {
+			return
+		}
+		limitLock.Lock()
+		if limitErr == nil {
+			limitErr = err
+		}
+		limitLock.Unlock()
+	}
 
 	err := s.scanTargets(ctx, func(scanTarget ScanTarget, err error) error {
 		select {
@@ -168,13 +186,17 @@ func (s *Files) Fragments(ctx context.Context, yield FragmentsFunc) error {
 					Symlink:         scanTarget.Symlink,
 					Config:          s.Config,
 					MaxArchiveDepth: s.MaxArchiveDepth,
+					ArchiveLimits:   s.ArchiveLimits,
 				}
 
 				err = file.Fragments(ctx, yield)
 				// Avoiding a defer in a hot loop
 				_ = f.Close()
 				wg.Done()
-				return err
+				if err != nil {
+					captureLimit(err)
+				}
+				return nil
 			})
 
 			return nil
@@ -186,6 +208,9 @@ func (s *Files) Fragments(ctx context.Context, yield FragmentsFunc) error {
 		return ctx.Err()
 	default:
 		wg.Wait()
-		return err
+		if err != nil {
+			return err
+		}
+		return limitErr
 	}
 }
