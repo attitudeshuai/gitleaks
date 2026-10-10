@@ -6,16 +6,18 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"strings"
 )
 
 type JunitReporter struct {
+	SummarySettings
 }
 
 var _ Reporter = (*JunitReporter)(nil)
 
 func (r *JunitReporter) Write(w io.WriteCloser, findings []Finding) error {
 	testSuites := TestSuites{
-		TestSuites: getTestSuites(findings),
+		TestSuites: r.getTestSuites(findings),
 	}
 
 	io.WriteString(w, xml.Header)
@@ -24,16 +26,67 @@ func (r *JunitReporter) Write(w io.WriteCloser, findings []Finding) error {
 	return encoder.Encode(testSuites)
 }
 
-func getTestSuites(findings []Finding) []TestSuite {
+func (r *JunitReporter) getTestSuites(findings []Finding) []TestSuite {
 	return []TestSuite{
 		{
-			Failures:  strconv.Itoa(len(findings)),
-			Name:      "gitleaks",
-			Tests:     strconv.Itoa(len(findings)),
-			TestCases: getTestCases(findings),
-			Time:      "",
+			Failures:   strconv.Itoa(len(findings)),
+			Name:       "gitleaks",
+			Tests:      strconv.Itoa(len(findings)),
+			Properties: r.getProperties(),
+			TestCases:  getTestCases(findings),
+			Time:       "",
 		},
 	}
+}
+
+// getProperties renders the scan summary as JUnit testsuite properties.
+// Returns nil when no summary is attached so output stays byte-identical.
+func (r *JunitReporter) getProperties() *JunitProperties {
+	if r.Summary == nil {
+		return nil
+	}
+
+	s := r.Summary
+	props := []JunitProperty{
+		{Name: "gitleaks.findings_count", Value: strconv.Itoa(s.FindingsCount)},
+		{Name: "gitleaks.bytes_scanned", Value: strconv.FormatUint(s.BytesScanned, 10)},
+		{Name: "gitleaks.commits_scanned", Value: strconv.Itoa(s.CommitsScanned)},
+		{Name: "gitleaks.generated_at", Value: s.GeneratedAt.Format("2006-01-02T15:04:05Z07:00")},
+		{Name: "gitleaks.tool_name", Value: s.Tool.Name},
+		{Name: "gitleaks.tool_version", Value: s.Tool.Version},
+		{Name: "gitleaks.config", Value: s.Config.Identity},
+		{Name: "gitleaks.source_type", Value: s.Source.Type},
+		{Name: "gitleaks.source_path", Value: s.Source.Path},
+	}
+
+	var truncated []string
+	addGroups := func(name string, gc *GroupCounts) {
+		if gc == nil {
+			return
+		}
+		for _, c := range gc.Counts {
+			props = append(props, JunitProperty{Name: "gitleaks." + name + "." + c.Key, Value: strconv.Itoa(c.Count)})
+		}
+		if gc.Limited {
+			truncated = append(truncated, name)
+			props = append(props, JunitProperty{
+				Name:  "gitleaks." + name + ".total",
+				Value: strconv.Itoa(gc.Total),
+			})
+		}
+	}
+	addGroups(GroupByRule, s.Groups.ByRule)
+	addGroups(GroupByTag, s.Groups.ByTag)
+	addGroups(GroupByFile, s.Groups.ByFile)
+
+	if len(truncated) > 0 {
+		props = append(props, JunitProperty{
+			Name:  "gitleaks.groups_truncated",
+			Value: strings.Join(truncated, ";"),
+		})
+	}
+
+	return &JunitProperties{Properties: props}
 }
 
 func getTestCases(findings []Finding) []TestCase {
@@ -82,12 +135,24 @@ type TestSuites struct {
 }
 
 type TestSuite struct {
-	XMLName   xml.Name   `xml:"testsuite"`
-	Failures  string     `xml:"failures,attr"`
-	Name      string     `xml:"name,attr"`
-	Tests     string     `xml:"tests,attr"`
-	TestCases []TestCase `xml:"testcase"`
-	Time      string     `xml:"time,attr"`
+	XMLName    xml.Name         `xml:"testsuite"`
+	Failures   string           `xml:"failures,attr"`
+	Name       string           `xml:"name,attr"`
+	Tests      string           `xml:"tests,attr"`
+	Properties *JunitProperties `xml:"properties,omitempty"`
+	TestCases  []TestCase       `xml:"testcase"`
+	Time       string           `xml:"time,attr"`
+}
+
+type JunitProperties struct {
+	XMLName    xml.Name        `xml:"properties"`
+	Properties []JunitProperty `xml:"property"`
+}
+
+type JunitProperty struct {
+	XMLName xml.Name `xml:"property"`
+	Name    string   `xml:"name,attr"`
+	Value   string   `xml:"value,attr"`
 }
 
 type TestCase struct {

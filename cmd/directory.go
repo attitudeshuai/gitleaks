@@ -6,6 +6,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/zricethezav/gitleaks/v8/logging"
+	"github.com/zricethezav/gitleaks/v8/report"
 	"github.com/zricethezav/gitleaks/v8/sources"
 )
 
@@ -42,6 +43,8 @@ func runDirectory(cmd *cobra.Command, args []string) {
 	start := time.Now()
 
 	detector := Detector(cmd, cfg, source)
+	detector.SourceType = report.SourceTypeDirectory
+	detector.SourcePath = source
 
 	// set follow symlinks flag
 	if detector.FollowSymlinks, err = cmd.Flags().GetBool("follow-symlinks"); err != nil {

@@ -9,6 +9,7 @@ import (
 )
 
 type SarifReporter struct {
+	SummarySettings
 	OrderedRules []config.Rule
 }
 
@@ -29,17 +30,34 @@ func (r *SarifReporter) Write(w io.WriteCloser, findings []Finding) error {
 func (r *SarifReporter) getRuns(findings []Finding) []Runs {
 	return []Runs{
 		{
-			Tool:    r.getTool(),
-			Results: getResults(findings),
+			Tool:       r.getTool(),
+			Results:    getResults(findings),
+			Properties: r.getProperties(),
 		},
 	}
 }
 
+// getProperties exposes the scan summary in the SARIF run property bag.
+// Returns nil when no summary is attached so output stays byte-identical.
+func (r *SarifReporter) getProperties() *RunProperties {
+	if r.Summary == nil {
+		return nil
+	}
+	return &RunProperties{ScanSummary: r.Summary}
+}
+
 func (r *SarifReporter) getTool() Tool {
+	// Prefer the build-injected version carried by the scan summary; fall
+	// back to the legacy constant only when summaries are disabled.
+	semanticVersion := version
+	if r.Summary != nil {
+		semanticVersion = r.Summary.Tool.Version
+	}
+
 	tool := Tool{
 		Driver: Driver{
 			Name:            driver,
-			SemanticVersion: version,
+			SemanticVersion: semanticVersion,
 			InformationUri:  "https://github.com/gitleaks/gitleaks",
 			Rules:           r.getRules(),
 		},
@@ -108,10 +126,7 @@ func getResults(findings []Finding) []Results {
 }
 
 func getLocation(f Finding) []Locations {
-	uri := f.File
-	if f.SymlinkFile != "" {
-		uri = f.SymlinkFile
-	}
+	uri := FindingPath(f)
 	return []Locations{
 		{
 			PhysicalLocation: PhysicalLocation{
@@ -212,6 +227,13 @@ type Results struct {
 }
 
 type Runs struct {
-	Tool    Tool      `json:"tool"`
-	Results []Results `json:"results"`
+	Tool       Tool           `json:"tool"`
+	Results    []Results      `json:"results"`
+	Properties *RunProperties `json:"properties,omitempty"`
+}
+
+// RunProperties is the SARIF run-level property bag. Non-standard members
+// are namespaced under "gitleaks/" per the SARIF property-bag convention.
+type RunProperties struct {
+	ScanSummary *ScanSummary `json:"gitleaks/scanSummary,omitempty"`
 }

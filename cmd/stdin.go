@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/zricethezav/gitleaks/v8/logging"
+	"github.com/zricethezav/gitleaks/v8/report"
 	"github.com/zricethezav/gitleaks/v8/sources"
 )
 
@@ -32,6 +33,7 @@ func runStdIn(cmd *cobra.Command, _ []string) {
 
 	// create detector
 	detector := Detector(cmd, cfg, "")
+	detector.SourceType = report.SourceTypeStdin
 
 	// parse flag(s)
 	exitCode := mustGetIntFlag(cmd, "exit-code")

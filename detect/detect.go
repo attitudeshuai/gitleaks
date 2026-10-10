@@ -103,6 +103,20 @@ type Detector struct {
 	ReportPath string
 	Reporter   report.Reporter
 
+	// ReportSummary enables the scan summary in the written report.
+	ReportSummary bool
+	// ReportSummaryGroups selects the summary groupings ("rule", "tag", "file").
+	ReportSummaryGroups []string
+	// ReportSummaryGroupLimit caps the number of entries per summary
+	// grouping. 0 means no limit.
+	ReportSummaryGroupLimit int
+
+	// SourceType identifies the kind of source that was scanned
+	// ("git", "directory", "stdin"). Empty when unset by the caller.
+	SourceType string
+	// SourcePath is the path of the scan target, if any.
+	SourcePath string
+
 	TotalBytes atomic.Uint64
 }
 
@@ -758,6 +772,14 @@ func (d *Detector) addCommit(commit string) {
 	d.commitMutex.Lock()
 	d.commitMap[commit] = true
 	d.commitMutex.Unlock()
+}
+
+// CommitsScanned returns the number of unique commits seen by the scan.
+// It is safe to call concurrently and is 0 for non-git sources.
+func (d *Detector) CommitsScanned() int {
+	d.commitMutex.Lock()
+	defer d.commitMutex.Unlock()
+	return len(d.commitMap)
 }
 
 // checkCommitOrPathAllowed evaluates |fragment| against all provided |allowlists|.

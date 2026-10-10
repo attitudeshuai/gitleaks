@@ -77,6 +77,9 @@ func init() {
 	rootCmd.PersistentFlags().StringP("report-path", "r", "", "report file (use \"-\" for stdout)")
 	rootCmd.PersistentFlags().StringP("report-format", "f", "", "output format (json, csv, junit, sarif, template)")
 	rootCmd.PersistentFlags().StringP("report-template", "", "", "template file used to generate the report (implies --report-format=template)")
+	rootCmd.PersistentFlags().Bool("report-summary", false, "include a scan summary (scope, tool/config identity, hit counts) in the report")
+	rootCmd.PersistentFlags().StringSlice("report-summary-groups", []string{report.GroupByRule}, "hit-count groupings to include in the scan summary: rule, tag, file")
+	rootCmd.PersistentFlags().Int("report-summary-group-limit", 0, "max number of entries per summary grouping (0 = no limit)")
 	rootCmd.PersistentFlags().StringP("baseline-path", "b", "", "path to baseline with issues that can be ignored")
 	rootCmd.PersistentFlags().StringP("log-level", "l", "info", "log level (trace, debug, info, warn, error, fatal)")
 	rootCmd.PersistentFlags().BoolP("verbose", "v", false, "show verbose output from scan")
@@ -405,6 +408,18 @@ func Detector(cmd *cobra.Command, cfg config.Config, source string) *detect.Dete
 		detector.Reporter = reporter
 	}
 
+	// Parse scan-summary settings.
+	detector.ReportSummary = mustGetBoolFlag(cmd, "report-summary")
+	detector.ReportSummaryGroupLimit = mustGetIntFlag(cmd, "report-summary-group-limit")
+	for _, group := range mustGetStringSliceFlag(cmd, "report-summary-groups") {
+		switch strings.TrimSpace(strings.ToLower(group)) {
+		case report.GroupByRule, report.GroupByTag, report.GroupByFile:
+			detector.ReportSummaryGroups = append(detector.ReportSummaryGroups, strings.TrimSpace(strings.ToLower(group)))
+		default:
+			logging.Fatal().Msgf("unknown report summary grouping %q (expected one of: rule, tag, file)", group)
+		}
+	}
+
 	return detector
 }
 
@@ -479,6 +494,13 @@ func findingSummaryAndExit(detector *detect.Detector, findings []report.Finding,
 			}()
 		}
 
+		// Attach the same scan summary to every report format.
+		if detector.ReportSummary {
+			if setter, ok := detector.Reporter.(report.ScanSummarySetter); ok {
+				setter.SetScanSummary(buildScanSummary(detector, findings))
+			}
+		}
+
 		// Write to the file.
 		if reportErr = detector.Reporter.Write(file, findings); reportErr != nil {
 			goto ReportEnd
@@ -545,4 +567,64 @@ func mustGetStringFlag(cmd *cobra.Command, name string) string {
 		logging.Fatal().Err(err).Msgf("could not get flag: %s", name)
 	}
 	return value
+}
+
+func mustGetStringSliceFlag(cmd *cobra.Command, name string) []string {
+	value, err := cmd.Flags().GetStringSlice(name)
+	if err != nil {
+		logging.Fatal().Err(err).Msgf("could not get flag: %s", name)
+	}
+	return value
+}
+
+// buildScanSummary assembles the single ScanSummary rendered into the
+// report. The counts come from the finalized findings slice and detector
+// counters, so they match the log line and stay consistent across formats.
+func buildScanSummary(detector *detect.Detector, findings []report.Finding) *report.ScanSummary {
+	opts := report.SummaryOptions{
+		GroupLimit: detector.ReportSummaryGroupLimit,
+	}
+	for _, group := range detector.ReportSummaryGroups {
+		switch group {
+		case report.GroupByRule:
+			opts.ByRule = true
+		case report.GroupByTag:
+			opts.ByTag = true
+		case report.GroupByFile:
+			opts.ByFile = true
+		}
+	}
+
+	return report.NewScanSummary(report.ScanMeta{
+		Version:        version.Version,
+		ConfigIdentity: configIdentity(detector.SourcePath),
+		SourceType:     detector.SourceType,
+		SourcePath:     detector.SourcePath,
+		BytesScanned:   detector.TotalBytes.Load(),
+		CommitsScanned: detector.CommitsScanned(),
+	}, findings, opts)
+}
+
+// configIdentity resolves which configuration is in effect, mirroring the
+// precedence in initConfig. The embedded default always has an explicit
+// identity even though no config file was specified.
+func configIdentity(source string) string {
+	cfgPath, _ := rootCmd.Flags().GetString("config")
+	switch {
+	case cfgPath != "":
+		return cfgPath
+	case os.Getenv("GITLEAKS_CONFIG") != "":
+		return os.Getenv("GITLEAKS_CONFIG")
+	case os.Getenv("GITLEAKS_CONFIG_TOML") != "":
+		return report.EnvConfigIdentity
+	}
+
+	if info, err := os.Stat(source); err == nil && info.IsDir() {
+		autoPath := filepath.Join(source, ".gitleaks.toml")
+		if _, err := os.Stat(autoPath); err == nil {
+			return autoPath
+		}
+	}
+
+	return report.DefaultConfigIdentity
 }

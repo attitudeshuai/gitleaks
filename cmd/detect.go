@@ -65,6 +65,17 @@ func runDetect(cmd *cobra.Command, args []string) {
 	exitCode := mustGetIntFlag(cmd, "exit-code")
 	noGit := mustGetBoolFlag(cmd, "no-git")
 	fromPipe := mustGetBoolFlag(cmd, "pipe")
+
+	switch {
+	case noGit:
+		detector.SourceType = report.SourceTypeDirectory
+		detector.SourcePath = sourcePath
+	case fromPipe:
+		detector.SourceType = report.SourceTypeStdin
+	default:
+		detector.SourceType = report.SourceTypeGit
+		detector.SourcePath = sourcePath
+	}
 	// determine what type of scan:
 	// - git: scan the history of the repo
 	// - no-git: scan files by treating the repo as a plain directory

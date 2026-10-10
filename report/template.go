@@ -10,7 +10,13 @@ import (
 	"github.com/Masterminds/sprig/v3"
 )
 
+// SummaryTemplateFunc is the template function that returns the scan
+// summary attached to the report. It returns nil when summaries are
+// disabled, so templates can guard with {{ if gitleaksSummary }}.
+const SummaryTemplateFunc = "gitleaksSummary"
+
 type TemplateReporter struct {
+	SummarySettings
 	template *template.Template
 }
 
@@ -35,12 +41,22 @@ func NewTemplateReporter(templatePath string) (*TemplateReporter, error) {
 	delete(funcMap, "expandenv")
 	delete(funcMap, "getHostByName")
 
+	reporter := &TemplateReporter{}
+	// Expose the scan summary without changing the template context: the
+	// root value (".") remains the plain findings slice, so existing
+	// templates render exactly as before. The closure reads the field at
+	// execution time, after the summary has been attached.
+	funcMap[SummaryTemplateFunc] = func() *ScanSummary {
+		return reporter.Summary
+	}
+
 	t = t.Funcs(funcMap)
 	t, err = t.Parse(templateText)
 	if err != nil {
 		return nil, fmt.Errorf("error parsing file: %w", err)
 	}
-	return &TemplateReporter{template: t}, nil
+	reporter.template = t
+	return reporter, nil
 }
 
 // writeTemplate renders the findings using the user-provided template.
