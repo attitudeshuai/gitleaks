@@ -18,6 +18,13 @@ type Fragment struct {
 	// CommitSHA is the SHA of the commit if applicable
 	CommitSHA string // TODO: remove this in v9 and use CommitInfo instead
 
+	// CommitOrder is the position of the commit in the input stream.
+	// It is assigned by the source when the commit is first seen (starting
+	// at 1) and carried by every fragment of that commit, so findings can
+	// be ordered by commit without relying on completion order or guessing
+	// from the SHA. Fragments without a commit source leave this at 0.
+	CommitOrder int
+
 	// StartLine is the line number this fragment starts on
 	StartLine int
 

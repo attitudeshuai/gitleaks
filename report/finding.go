@@ -34,6 +34,11 @@ type Finding struct {
 	Commit      string
 	Link        string `json:",omitempty"`
 
+	// CommitOrder is the position of the commit in the input stream, as
+	// recorded by the source. It is part of the deterministic ordering key
+	// only; it is not included in any report format.
+	CommitOrder int `json:"-"`
+
 	// Entropy is the shannon entropy of Value
 	Entropy float32
 

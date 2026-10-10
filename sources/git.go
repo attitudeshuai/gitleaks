@@ -307,6 +307,12 @@ func (s *Git) Fragments(ctx context.Context, yield FragmentsFunc) error {
 		diffFilesCh = s.Cmd.DiffFilesCh()
 		errCh       = s.Cmd.ErrCh()
 		wg          sync.WaitGroup
+
+		// commitCount is the number of distinct commits seen so far in the
+		// input stream; commitOrders records the position assigned to each
+		// commit when first seen.
+		commitCount  int
+		commitOrders = make(map[string]int)
 	)
 
 	// loop to range over both DiffFiles (stdout) and ErrCh (stderr)
@@ -335,9 +341,27 @@ func (s *Git) Fragments(ctx context.Context, yield FragmentsFunc) error {
 
 			// Check if commit is allowed
 			commitSHA := ""
+			// commitOrder is the position of this commit in the input stream;
+			// 0 for diffs that have no commit (e.g. git diff).
+			commitOrder := 0
 			var commitInfo *CommitInfo
 			if gitdiffFile.PatchHeader != nil {
 				commitSHA = gitdiffFile.PatchHeader.SHA
+
+				// Assign the commit's position on first sight; a commit can
+				// span multiple gitdiff files. A PatchHeader without a SHA
+				// (e.g. plain `git diff`) is not a commit, so it keeps
+				// CommitOrder 0 and falls back to file/location ordering.
+				if commitSHA != "" {
+					if order, ok := commitOrders[commitSHA]; ok {
+						commitOrder = order
+					} else {
+						commitCount++
+						commitOrder = commitCount
+						commitOrders[commitSHA] = commitOrder
+					}
+				}
+
 				for _, a := range s.Config.Allowlists {
 					if ok, c := a.CommitAllowed(gitdiffFile.PatchHeader.SHA); ok {
 						logging.Trace().Str("allowed-commit", c).Msg("skipping commit: global allowlist")
@@ -379,6 +403,7 @@ func (s *Git) Fragments(ctx context.Context, yield FragmentsFunc) error {
 					// enrich and yield fragments
 					err = file.Fragments(ctx, func(fragment Fragment, err error) error {
 						fragment.CommitSHA = commitSHA
+						fragment.CommitOrder = commitOrder
 						fragment.CommitInfo = commitInfo
 						return yield(fragment, err)
 					})
@@ -397,11 +422,12 @@ func (s *Git) Fragments(ctx context.Context, yield FragmentsFunc) error {
 					}
 
 					fragment := Fragment{
-						CommitSHA:  commitSHA,
-						FilePath:   gitdiffFile.NewName,
-						Raw:        textFragment.Raw(gitdiff.OpAdd),
-						StartLine:  int(textFragment.NewPosition),
-						CommitInfo: commitInfo,
+						CommitSHA:   commitSHA,
+						CommitOrder: commitOrder,
+						FilePath:    gitdiffFile.NewName,
+						Raw:         textFragment.Raw(gitdiff.OpAdd),
+						StartLine:   int(textFragment.NewPosition),
+						CommitInfo:  commitInfo,
 					}
 
 					if err := yield(fragment, nil); err != nil {

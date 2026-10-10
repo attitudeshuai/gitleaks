@@ -90,6 +90,7 @@ func init() {
 	rootCmd.PersistentFlags().StringP("gitleaks-ignore-path", "i", ".", "path to .gitleaksignore file or folder containing one")
 	rootCmd.PersistentFlags().Int("max-decode-depth", 5, "allow recursive decoding up to this depth")
 	rootCmd.PersistentFlags().Int("max-archive-depth", 0, "allow scanning into nested archives up to this depth (default \"0\", no archive traversal is done)")
+	rootCmd.PersistentFlags().Bool("no-sort", false, "do not sort findings; keep the collection order (disables the deterministic output ordering)")
 	rootCmd.PersistentFlags().Int("timeout", 0, "set a timeout for gitleaks commands in seconds (default \"0\", no timeout is set)")
 
 	// Add diagnostics flags
@@ -294,6 +295,11 @@ func Detector(cmd *cobra.Command, cfg config.Config, source string) *detect.Dete
 	}
 	// set ignore gitleaks:allow flag
 	if detector.IgnoreGitleaksAllow, err = cmd.Flags().GetBool("ignore-gitleaks-allow"); err != nil {
+		logging.Fatal().Err(err).Send()
+	}
+
+	// set no-sort flag
+	if detector.NoSort, err = cmd.Flags().GetBool("no-sort"); err != nil {
 		logging.Fatal().Err(err).Send()
 	}
 

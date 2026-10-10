@@ -88,5 +88,10 @@ func (d *Detector) DetectFiles(scanTargets <-chan sources.ScanTarget) ([]report.
 	}
 
 	wg.Wait()
+
+	// Keep the deprecated path consistent with DetectSource: order the
+	// collected findings once and print (verbose) in that order.
+	d.finalizeFindings()
+
 	return d.findings, nil
 }

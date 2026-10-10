@@ -66,6 +66,12 @@ type Detector struct {
 	// IgnoreGitleaksAllow is a flag to ignore gitleaks:allow comments.
 	IgnoreGitleaksAllow bool
 
+	// NoSort disables the deterministic ordering of findings. When false
+	// (the default), findings are sorted via report.Less once all results
+	// have been collected; when true, the collection (completion) order is
+	// preserved, matching the pre-ordering output.
+	NoSort bool
+
 	// commitMutex is to prevent concurrent access to the
 	// commit map when adding commits
 	commitMutex *sync.Mutex
@@ -263,6 +269,10 @@ func (d *Detector) DetectSource(ctx context.Context, source sources.Source) ([]r
 		logging.Debug().Msg("Note: this number might be smaller than expected due to commits with no additions")
 	}
 
+	// Order the collected findings once, after collection, so verbose
+	// output and all report formats share the same deterministic order.
+	d.finalizeFindings()
+
 	return d.Findings(), err
 }
 
@@ -396,6 +406,7 @@ func (d *Detector) detectRule(fragment Fragment, currentRaw string, r config.Rul
 			if r.Path.MatchString(fragment.FilePath) || (fragment.WindowsFilePath != "" && r.Path.MatchString(fragment.WindowsFilePath)) {
 				finding := report.Finding{
 					Commit:      fragment.CommitSHA,
+					CommitOrder: fragment.CommitOrder,
 					RuleID:      r.RuleID,
 					Description: r.Description,
 					File:        fragment.FilePath,
@@ -487,6 +498,7 @@ func (d *Detector) detectRule(fragment Fragment, currentRaw string, r config.Rul
 
 		finding := report.Finding{
 			Commit:      fragment.CommitSHA,
+			CommitOrder: fragment.CommitOrder,
 			RuleID:      r.RuleID,
 			Description: r.Description,
 			StartLine:   fragment.StartLine + loc.startLine,
@@ -742,10 +754,38 @@ func (d *Detector) AddFinding(finding report.Finding) {
 
 	d.findingMutex.Lock()
 	d.findings = append(d.findings, finding)
-	if d.Verbose {
+	d.findingMutex.Unlock()
+}
+
+// orderFindings sorts the collected findings in place using the
+// deterministic output order. It is called once after all results have been
+// collected, so the order does not depend on concurrent task completion.
+// When NoSort is set, findings retain their collection order.
+func (d *Detector) orderFindings() {
+	if d.NoSort {
+		return
+	}
+	report.SortFindings(d.findings)
+}
+
+// printFindings prints the findings (verbose output). It runs after
+// ordering so the verbose output uses the same order as every report
+// format. With NoSort set, findings print in collection order, matching
+// the pre-ordering behavior.
+func (d *Detector) printFindings() {
+	if !d.Verbose {
+		return
+	}
+	for _, finding := range d.findings {
 		printFinding(finding, d.NoColor)
 	}
-	d.findingMutex.Unlock()
+}
+
+// finalizeFindings applies the deterministic ordering and, when verbose,
+// prints the findings in that order.
+func (d *Detector) finalizeFindings() {
+	d.orderFindings()
+	d.printFindings()
 }
 
 // Findings returns the findings added to the detector
